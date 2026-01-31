@@ -1,7 +1,7 @@
 ---
 title: N1CTF 部分WP
 published: 2026-01-31
-description: 
+description: "只写出来了3道题"
 image: ''
 tags: [PWN，CTF]
 category: PWN
