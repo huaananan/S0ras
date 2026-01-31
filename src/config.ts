@@ -19,7 +19,7 @@ export const noticeConfig: NoticeConfig = {
 
 export const siteConfig: SiteConfig = {
 	title: "S0ras",
-	subtitle: "记录学习过程",
+	subtitle: "",
 	description:
 		"开发与安全学习",
 
