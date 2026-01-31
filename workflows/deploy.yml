@@ -1,10 +1,8 @@
 name: Deploy to GitHub Pages
 
 on:
-  # 每次推送到 main 分支时触发
   push:
     branches: [ main ]
-  # 允许手动触发
   workflow_dispatch:
 
 permissions:
@@ -18,11 +16,10 @@ jobs:
     steps:
       - name: Checkout your repository using git
         uses: actions/checkout@v4
-        
+
       - name: Install, build, and upload your site
         uses: withastro/action@v2
         with:
-            # 这里的 pnpm 对应你本地使用的包管理器
             package-manager: pnpm@latest
 
   deploy:
