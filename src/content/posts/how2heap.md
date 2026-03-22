@@ -3279,6 +3279,164 @@ bk_nextsize: 0x00
 最后再malloc一个大chunk使unsorted bin chunk进入largebin中触发large bin attack
 ```
 
+## tcache基础与tcache poisoning
+
+tcache是Glibc 2.26之后引入的，用来提高堆管理的速度
+
+tcache引入了两个新的结构体：`tcache_entry`和`tcache_perthread_struct`
+
+**tcache_entry：**`tcache_entry`用于链接空闲的chunk结构体，其中`next`指针指向下一个`大小相同`的chunk
+
+```c
+typedef struct tcache_entry
+{
+  struct tcache_entry *next;
+} tcache_entry;
+
+```
+
+这里需要注意的是next指向chunk的`data`部分，这和fastbin有一些不同，fastbin的fd指向的是下一个chunk的头指针。tcache_entry会复用空闲chunk的data 部分
+
+**tcache_perthread_struct:**tcache_perthread_struct是用来管理tcache链表的，这个结构体位于heap段的起始位置，size大小为0x251,每一个thread都会维护一个`tcache_perthread_struct`结构体，一共有`TCACHE_MAX_BINS`个计数器`TCACHE_MAX_BINS`项tcache_entry
+
+```c
+typedef struct tcache_perthread_struct
+{
+  char counts[TCACHE_MAX_BINS];						//counts 记录了 tcache_entry 链上空闲 chunk 的数目，每条链上最多可以有 7 个 chunk
+  tcache_entry *entries[TCACHE_MAX_BINS];		//tcache_entry 用单向链表的方式链接了相同大小的处于空闲状态（free 后）的 chunk
+} tcache_perthread_struct;
+
+# define TCACHE_MAX_BINS                64
+
+static __thread tcache_perthread_struct *tcache = NULL;
+
+```
+
+ ![在这里插入图片描述](https://i-blog.csdnimg.cn/blog_migrate/cf7fd07a7b6e50fb2aa73d40e232b166.jpeg#pic_center)
+
+#### tcache poisoning
+
+tcache poisoning主要的利用手段是覆盖tcache中的next成员变量，由于tcache_get()函数没有对next进行检查，所以理论上来讲如果我们将next中的地址进行替换，不需要伪造任何chunk结构即可实现malloc到任何地址
+
+##### libc 2.27
+
+##### libc 2.29
+
+Tcache Key
+
+在每个空闲 chunk 的 `fd` 指针旁边（即原 `bk` 指针的位置），你都能看到一个一模一样的神秘数值：
+
+- `0x5555555592a8`: `0x313f315503c525e4`
+- `0x555555559338`: `0x313f315503c525e4`
+
+这是 **Tcache Key**（在 glibc 2.29 引入）
+
+当一个 chunk 被放入 Tcache 时，glibc 会在这个位置写入一个随机生成的 8 字节密钥（每个程序的生命周期内这个密钥是固定的，存放在 `tcache_perthread_struct` 中
+
+**它的作用是防御 Tcache Double-Free：** 如果在程序执行 `free(p)` 时，堆管理器发现 `p` 的 key 位置存放的值与当前的 Tcache Key 相等，它就会遍历对应的 Tcache 链表。如果发现这个 chunk 已经在链表中了，就会直接报 `double free or corruption (fasttop)` 的 crash，从而阻止攻击者通过连续两次 free 同一个 chunk 来构造循环链表。
+
+##### libc 2.32
+
+```c
+pwndbg> heap
+Allocated chunk | PREV_INUSE
+Addr: 0x555555559000
+Size: 0x290 (with flag bits: 0x291)
+
+Free chunk (tcachebins) | PREV_INUSE
+Addr: 0x555555559290
+Size: 0x90 (with flag bits: 0x91)
+fd: 0x555555559
+
+Free chunk (tcachebins) | PREV_INUSE
+Addr: 0x555555559320
+Size: 0x90 (with flag bits: 0x91)
+fd: 0x55500000c7f9
+
+Top chunk | PREV_INUSE
+Addr: 0x5555555593b0
+Size: 0x20c50 (with flag bits: 0x20c51)
+
+pwndbg> x/50gx 0x555555559290
+0x555555559290: 0x0000000000000000      0x0000000000000091		--> chunk a
+0x5555555592a0: 0x0000000555555559      0x313f315503c525e4
+0x5555555592b0: 0x0000000000000000      0x0000000000000000
+0x5555555592c0: 0x0000000000000000      0x0000000000000000
+0x5555555592d0: 0x0000000000000000      0x0000000000000000
+0x5555555592e0: 0x0000000000000000      0x0000000000000000
+0x5555555592f0: 0x0000000000000000      0x0000000000000000
+0x555555559300: 0x0000000000000000      0x0000000000000000
+0x555555559310: 0x0000000000000000      0x0000000000000000
+0x555555559320: 0x0000000000000000      0x0000000000000091		--> chunk b
+0x555555559330: 0x000055500000c7f9      0x313f315503c525e4
+0x555555559340: 0x0000000000000000      0x0000000000000000
+0x555555559350: 0x0000000000000000      0x0000000000000000
+0x555555559360: 0x0000000000000000      0x0000000000000000
+0x555555559370: 0x0000000000000000      0x0000000000000000
+0x555555559380: 0x0000000000000000      0x0000000000000000
+0x555555559390: 0x0000000000000000      0x0000000000000000
+0x5555555593a0: 0x0000000000000000      0x0000000000000000
+0x5555555593b0: 0x0000000000000000      0x0000000000020c51
+```
+
+在libc 2.32之后，堆管理器引入了**Safe-Linking** 和 **Tcache Key**保护机制：
+
+1. Safe-Linking
+
+   我们观察释放的chunk的fd：
+
+   chunk a：0x0000000555555559
+
+   chunk b：0x000055500000c7f9 
+
+   解密过程：
+
+   ```python
+   Chunk b 的 fd 指针存放在地址 0x555555559330
+   将其右移 12 位（也就是去掉最后三个十六进制位），得到 0x555555559
+   内存中存储的加密值为 0x55500000c7f9
+   0x55500000c7f9 ^ 0x0000000555555559 = 0x5555555592a0 即chunk a的数据区
+   
+   Chunk a 的 fd 指针存放在地址 0x5555555592a0 右移 12 位得到 0x555555559
+   内存中的加密值为 0x0000000555555559
+   0x0000000555555559 ^ 0x0000000555555559 = 0x0000000000000000
+   解密结果为 0，说明 Chunk a 是这个 Tcache 链表上的最后一个块。
+   
+   def protect_ptr(pos, ptr):
+       """
+       加密指针：用于在利用漏洞覆盖 fd 时，计算出需要写入的加密值
+       :param pos: 存放该 fd 指针的内存地址 (即 堆块起始地址 + 0x10)
+       :param ptr: 你真正想要 tcache 指向的目标地址 (如栈地址、__free_hook 等)
+       :return: 应该写入内存的加密后数据
+       """
+       return (pos >> 12) ^ ptr
+   
+   def reveal_ptr(pos, val):
+       """
+       解密指针：用于在泄露了堆内存后，还原出真实的下一跳地址
+       :param pos: 存放该 fd 指针的内存地址
+       :param val: 从内存中泄露/读取出的加密值
+       :return: 真实的堆块物理地址
+       """
+       return (pos >> 12) ^ val
+   ```
+
+   
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

