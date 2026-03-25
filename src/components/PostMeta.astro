@@ -75,27 +75,32 @@ const postPath = slug ? getPostUrlBySlug(slug) : "";
 </div>
 
 {slug && (
-	<script define:vars={{ slug, umamiConfig, postPath }}>
-		function animateValue(obj, start, end, duration, suffix = "") {
+	<script define:vars={{ slug, postPath, umamiConfig }}>
+		function animateValueWithSuffix(element, start, end, duration, suffix) {
 			let startTimestamp = null;
+
 			const step = (timestamp) => {
 				if (!startTimestamp) startTimestamp = timestamp;
 				const progress = Math.min((timestamp - startTimestamp) / duration, 1);
-				obj.innerHTML = `${Math.floor(progress * (end - start) + start)} ${suffix}`;
+				const value = Math.floor(progress * (end - start) + start);
+				element.textContent = `${value} ${suffix}`;
 				if (progress < 1) {
 					window.requestAnimationFrame(step);
 				} else {
-					obj.innerHTML = `${end} ${suffix}`;
+					element.textContent = `${end} ${suffix}`;
 				}
 			};
+
 			window.requestAnimationFrame(step);
 		}
 
-		async function fetchPageViews() {
-			if (!umamiConfig.enable) return;
+		async function fetchPageStats() {
+			if (!umamiConfig.enable || typeof window.fetchUmamiStats !== "function") {
+				return;
+			}
 
 			try {
-				const statsData = await fetchUmamiStats(
+				const statsData = await window.fetchUmamiStats(
 					umamiConfig.baseUrl,
 					umamiConfig.shareId,
 					{
@@ -108,7 +113,7 @@ const postPath = slug ? getPostUrlBySlug(slug) : "";
 					(statsData.pageviews && statsData.pageviews.value) ||
 					statsData.pageviews ||
 					0;
-				const visits =
+				const visitors =
 					(statsData.visitors && statsData.visitors.value) ||
 					statsData.visitors ||
 					0;
@@ -116,44 +121,43 @@ const postPath = slug ? getPostUrlBySlug(slug) : "";
 				const viewsElement = document.getElementById(`page-views-${slug}`);
 				const visitorsElement = document.getElementById(`page-visitors-${slug}`);
 
-				if (statsData._fromCache) {
-					if (viewsElement) viewsElement.innerHTML = `${pageViews} 次`;
-					if (visitorsElement) visitorsElement.innerHTML = `${visits} 人`;
-					return;
-				}
-
 				if (viewsElement) {
 					const currentViews =
 						Number.parseInt(viewsElement.textContent || "0", 10) || 0;
-					if (currentViews !== pageViews) {
-						if (currentViews === 0) {
-							animateValue(viewsElement, currentViews, pageViews, 1000, "次");
-						} else {
-							viewsElement.innerHTML = `${pageViews} 次`;
-						}
+					if (statsData._fromCache || currentViews !== 0) {
+						viewsElement.textContent = `${pageViews} 次`;
+					} else {
+						animateValueWithSuffix(viewsElement, currentViews, pageViews, 1000, "次");
 					}
 				}
 
 				if (visitorsElement) {
-					const currentVisits =
+					const currentVisitors =
 						Number.parseInt(visitorsElement.textContent || "0", 10) || 0;
-					if (currentVisits !== visits) {
-						if (currentVisits === 0) {
-							animateValue(visitorsElement, currentVisits, visits, 1000, "人");
-						} else {
-							visitorsElement.innerHTML = `${visits} 人`;
-						}
+					if (statsData._fromCache || currentVisitors !== 0) {
+						visitorsElement.textContent = `${visitors} 人`;
+					} else {
+						animateValueWithSuffix(
+							visitorsElement,
+							currentVisitors,
+							visitors,
+							1000,
+							"人",
+						);
 					}
 				}
 			} catch (error) {
-				console.error("Error fetching page views:", error);
+				console.error("Failed to load post stats:", error);
 			}
 		}
 
 		if (document.readyState === "loading") {
-			document.addEventListener("DOMContentLoaded", fetchPageViews);
+			document.addEventListener("DOMContentLoaded", fetchPageStats);
 		} else {
-			fetchPageViews();
+			fetchPageStats();
 		}
+
+		document.addEventListener("swup:contentReplaced", fetchPageStats);
+		document.addEventListener("content:replace", fetchPageStats);
 	</script>
 )}

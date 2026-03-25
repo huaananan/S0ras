@@ -148,14 +148,14 @@ export const imageFallbackConfig: ImageFallbackConfig = {
 
 export const umamiConfig: UmamiConfig = {
 	enable: true,
-	baseUrl: "https://umami.acofork.com",
+	baseUrl: "https://u.2x.nz",
 	websiteId: "5d710dbd-3a2e-43e3-a553-97b415090c63",
 	shareId: "CdkXbGgZr6ECKOyK",
 	timezone: "Asia/Shanghai",
 };
 
 export const siteAssetsConfig: SiteAssetsConfig = {
-	preconnect: ["https://pic1.acofork.com", "https://umami.acofork.com"],
+	preconnect: ["https://pic1.acofork.com", "https://u.2x.nz"],
 	backgroundScriptUrl: "https://pic1.acofork.com/random.js",
 };
 
