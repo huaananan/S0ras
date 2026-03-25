@@ -3,7 +3,14 @@ import "@fontsource/roboto/400.css";
 import "@fontsource/roboto/500.css";
 import "@fontsource/roboto/700.css";
 
-import { profileConfig, siteConfig } from "@/config";
+import {
+	analyticsConfig,
+	cookieConsentConfig,
+	profileConfig,
+	siteAssetsConfig,
+	siteConfig,
+	umamiConfig,
+} from "@/config";
 import ConfigCarrier from "@components/ConfigCarrier.astro";
 import NewPostNotification from "@components/widget/NewPostNotification.astro";
 import {
@@ -18,7 +25,7 @@ import {
 } from "../constants/constants";
 import { defaultFavicons } from "../constants/icon";
 import type { Favicon } from "../types/config";
-import { url, pathsEqual } from "../utils/url-utils";
+import { pathsEqual, resolveHref, url } from "../utils/url-utils";
 import "katex/dist/katex.css";
 
 interface Props {
@@ -80,6 +87,38 @@ const bannerOffsetByPosition = {
 };
 const bannerOffset =
 	bannerOffsetByPosition[siteConfig.banner.position || "center"];
+const rssHref = Astro.site
+	? new URL(url("/rss.xml"), Astro.site).toString()
+	: resolveHref("/rss.xml");
+const cookieConsentEnabled = cookieConsentConfig.enable;
+const cookieConsentPrivacyPolicyUrl = cookieConsentConfig.privacyPolicyUrl
+	? (() => {
+			const resolved = resolveHref(cookieConsentConfig.privacyPolicyUrl || "");
+			return Astro.site ? new URL(resolved, Astro.site).toString() : resolved;
+		})()
+	: undefined;
+const cookieConsentRuntimeConfig = {
+	notice_banner_type: cookieConsentConfig.noticeBannerType,
+	consent_type: cookieConsentConfig.consentType,
+	language: cookieConsentConfig.language,
+	page_load_consent_levels: cookieConsentConfig.pageLoadConsentLevels,
+	notice_banner_reject_button_hide: !cookieConsentConfig.showRejectButton,
+	preferences_center_close_button_hide:
+		!cookieConsentConfig.showPreferencesCloseButton,
+	page_refresh_confirmation_buttons:
+		cookieConsentConfig.pageRefreshConfirmationButtons,
+	website_name: cookieConsentConfig.websiteName,
+	...(cookieConsentPrivacyPolicyUrl
+		? {
+				website_privacy_policy_url: cookieConsentPrivacyPolicyUrl,
+			}
+		: {}),
+};
+const getScriptType = (consentLevel?: string) =>
+	cookieConsentEnabled && consentLevel ? "text/plain" : "text/javascript";
+const getConsentLevel = (consentLevel?: string) =>
+	cookieConsentEnabled && consentLevel ? consentLevel : undefined;
+const umamiScriptSrc = `${umamiConfig.baseUrl.replace(/\/$/, "")}/script.js`;
 ---
 
 <!DOCTYPE html>
@@ -114,12 +153,18 @@ const bannerOffset =
 
 		<meta name="viewport" content="width=device-width" />
 		<meta name="generator" content={Astro.generator} />
-        <link rel="preconnect" href="https://pic1.acofork.com" />
-        <link rel="preconnect" href="https://umami.acofork.com" />
-        <link rel="preconnect" href="https://support.nodeget.com" />
+		{(siteAssetsConfig.preconnect ?? []).map((href) => (
+			<link rel="preconnect" href={href} />
+		))}
 		
-		<script src="/js/umami-share.js" defer></script>
-		<script data-swup-ignore-script src="https://pic1.acofork.com/random.js" defer></script>
+		<script src={url("/js/umami-share.js")} defer></script>
+		{siteAssetsConfig.backgroundScriptUrl && (
+			<script
+				data-swup-ignore-script
+				src={resolveHref(siteAssetsConfig.backgroundScriptUrl)}
+				defer
+			></script>
+		)}
 		
 		
 		
@@ -232,16 +277,22 @@ const bannerOffset =
 		<slot name="head"></slot>
 
 
-		<link rel="alternate" type="application/rss+xml" title={profileConfig.name} href={`${Astro.site}rss.xml`}/>
+		<link
+			rel="alternate"
+			type="application/rss+xml"
+			title={profileConfig.name}
+			href={rssHref}
+		/>
 
 	</head>
 	<body class=" min-h-screen transition " class:list={[{"lg:is-home": isHomePage, "enable-banner": enableBanner}]}
 		  data-overlayscrollbars-initialize
 	>
 
-<!-- Cookie Consent by TermsFeed https://www.TermsFeed.com -->
-<script data-swup-ignore-script type="text/javascript" src="https://www.termsfeed.com/public/cookie-consent/4.2.0/cookie-consent.js" charset="UTF-8"></script>
-<script data-swup-ignore-script type="text/javascript" charset="UTF-8">
+{cookieConsentEnabled && (
+<Fragment>
+<script data-swup-ignore-script type="text/javascript" src={cookieConsentConfig.scriptUrl} charset="UTF-8"></script>
+<script data-swup-ignore-script type="text/javascript" charset="UTF-8" define:vars={{ cookieConsentRuntimeConfig }}>
 (function () {
 	const getStoredTheme = () => {
 		try {
@@ -272,17 +323,7 @@ const bannerOffset =
 		return window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light";
 	};
 
-	const baseConfig = {
-		notice_banner_type: "simple",
-		consent_type: "express",
-		language: "en",
-		page_load_consent_levels: ["strictly-necessary"],
-		notice_banner_reject_button_hide: false,
-		preferences_center_close_button_hide: false,
-		page_refresh_confirmation_buttons: false,
-		website_name: "AcoFork Blog",
-		website_privacy_policy_url: "https://blog.acofork.com/posts/privacy-policy/",
-	};
+	const baseConfig = cookieConsentRuntimeConfig;
 
 	const markCookieConsentHeadAssetsPersistent = () => {
 		const attr = "data-swup-theme";
@@ -384,47 +425,78 @@ const bannerOffset =
 	});
 })();
 </script>
+<noscript>Free cookie consent management tool by <a href="https://www.termsfeed.com/">TermsFeed</a></noscript>
+</Fragment>
+)}
 
-<!-- Basic Analytics -->
-<!-- Umami -->
-<script type="text/plain" data-cookie-consent="strictly-necessary" defer src="https://umami.acofork.com/script.js" data-website-id="5d710dbd-3a2e-43e3-a553-97b415090c63" data-swup-ignore-script></script>
-<!-- end of Basic Analytics-->
-
-<!-- Google Analytics -->
-		<!-- Google tag (gtag.js) -->
-		<script type="text/plain" data-cookie-consent="tracking" async src="https://www.googletagmanager.com/gtag/js?id=G-YG02LLPGWC" data-swup-ignore-script></script>
-		<script type="text/plain" data-cookie-consent="tracking">
-  		window.dataLayer = window.dataLayer || [];
-  		function gtag(){dataLayer.push(arguments);}
-  		gtag('js', new Date());
-  		gtag('config', 'G-YG02LLPGWC');
-		</script>
-<!-- end of Google Analytics-->
-
-<!-- Microsoft Clarity -->
-		<script type="text/plain" data-cookie-consent="tracking" data-swup-ignore-script>
-    	(function(c,l,a,r,i,t,y){
-        c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};
-        t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;
-        y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);
-    	})(window, document, "clarity", "script", "v94yrasi99");
-		</script>
-<!-- end of Site Experience & Interaction Analytics-->
-
-<!-- Google Adsense -->
+{umamiConfig.enable && umamiConfig.websiteId && (
 <script
-	type="text/plain"
-	data-cookie-consent="targeting"
+	type={getScriptType("strictly-necessary")}
+	data-cookie-consent={getConsentLevel("strictly-necessary")}
+	defer
+	src={umamiScriptSrc}
+	data-website-id={umamiConfig.websiteId}
+	data-swup-ignore-script
+></script>
+)}
+
+{analyticsConfig.googleAnalytics.enable &&
+	analyticsConfig.googleAnalytics.measurementId && (
+	<Fragment>
+		<script
+			type={getScriptType(analyticsConfig.googleAnalytics.consentLevel)}
+			data-cookie-consent={getConsentLevel(
+				analyticsConfig.googleAnalytics.consentLevel,
+			)}
+			async
+			src={`https://www.googletagmanager.com/gtag/js?id=${analyticsConfig.googleAnalytics.measurementId}`}
+			data-swup-ignore-script
+		></script>
+		<script
+			type={getScriptType(analyticsConfig.googleAnalytics.consentLevel)}
+			data-cookie-consent={getConsentLevel(
+				analyticsConfig.googleAnalytics.consentLevel,
+			)}
+			define:vars={{
+				googleAnalyticsMeasurementId:
+					analyticsConfig.googleAnalytics.measurementId,
+			}}
+		>
+			window.dataLayer = window.dataLayer || [];
+			function gtag() {
+				dataLayer.push(arguments);
+			}
+			gtag("js", new Date());
+			gtag("config", googleAnalyticsMeasurementId);
+		</script>
+	</Fragment>
+)}
+
+{analyticsConfig.clarity.enable && analyticsConfig.clarity.projectId && (
+<script
+	type={getScriptType(analyticsConfig.clarity.consentLevel)}
+	data-cookie-consent={getConsentLevel(analyticsConfig.clarity.consentLevel)}
+	data-swup-ignore-script
+	define:vars={{ clarityProjectId: analyticsConfig.clarity.projectId }}
+>
+	(function(c,l,a,r,i,t,y){
+		c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};
+		t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;
+		y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);
+	})(window, document, "clarity", "script", clarityProjectId);
+</script>
+)}
+
+{analyticsConfig.adsense.enable && analyticsConfig.adsense.clientId && (
+<script
+	type={getScriptType(analyticsConfig.adsense.consentLevel)}
+	data-cookie-consent={getConsentLevel(analyticsConfig.adsense.consentLevel)}
 	async
-	src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-1683686345039700"
+	src={`https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${analyticsConfig.adsense.clientId}`}
 	data-swup-ignore-script
 	crossorigin="anonymous"
 ></script>
-<!-- end of Google Adsense-->
-
-<noscript>Free cookie consent management tool by <a href="https://www.termsfeed.com/">TermsFeed</a></noscript>
-<!-- End Cookie Consent by TermsFeed https://www.TermsFeed.com -->
-
+)}
 
 		<noscript>
 			<style>

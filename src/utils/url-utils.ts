@@ -24,3 +24,10 @@ export function getDir(path: string): string {
 export function url(path: string) {
 	return joinUrl("", import.meta.env.BASE_URL, path);
 }
+
+export function resolveHref(href: string) {
+	if (!href) {
+		return href;
+	}
+	return href.startsWith("/") ? url(href) : href;
+}

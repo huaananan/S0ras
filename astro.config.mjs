@@ -17,8 +17,11 @@ import remarkDirective from "remark-directive";
 import { remarkGithubAdmonitions } from "./src/plugins/remark-github-admonitions.js";
 import remarkMath from "remark-math";
 import remarkSectionize from "remark-sectionize";
-import { imageFallbackConfig, siteConfig } from "./src/config.ts";
-import { expressiveCodeConfig } from "./src/config.ts";
+import {
+	deployConfig,
+	expressiveCodeConfig,
+	imageFallbackConfig,
+} from "./src/config.ts";
 import { pluginCustomCopyButton } from "./src/plugins/expressive-code/custom-copy-button.js";
 import { AdmonitionComponent } from "./src/plugins/rehype-component-admonition.mjs";
 import { GithubCardComponent } from "./src/plugins/rehype-component-github-card.mjs";
@@ -33,11 +36,11 @@ export default defineConfig({
         service: passthroughImageService(),
     },
     
-    site: "https://huaananan.github.io",
+    site: deployConfig.site,
     
-    base: "/S0ras",
+    base: deployConfig.base,
     
-    trailingSlash: "always",
+    trailingSlash: deployConfig.trailingSlash,
     output: "static",
     
 

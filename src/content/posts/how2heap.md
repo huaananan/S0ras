@@ -1350,8 +1350,6 @@ gef➤  heap bins unsorted
  →   Chunk(addr=0x603060, size=0x40, flags=PREV_INUSE)    
 ```
 
-
-
 最后，再次 malloc 将返回 fake chunk 1 的地址，地址在栈上且我们能够控制。同时 small bin 变成这样：
 
 ```c
@@ -3279,161 +3277,117 @@ bk_nextsize: 0x00
 最后再malloc一个大chunk使unsorted bin chunk进入largebin中触发large bin attack
 ```
 
-## tcache基础与tcache poisoning
 
-tcache是Glibc 2.26之后引入的，用来提高堆管理的速度
 
-tcache引入了两个新的结构体：`tcache_entry`和`tcache_perthread_struct`
+### house of rabbit
 
-**tcache_entry：**`tcache_entry`用于链接空闲的chunk结构体，其中`next`指针指向下一个`大小相同`的chunk
+#### 利用原理
+
+该利用技巧的核心是 `malloc_consolidate` 函数，当检测到有 `fastbin` 的时候，会取出每一个 `fastbin chunk`，将其放置到 `unsortedbin` 中，并进行合并。以修改 `fd` 为例，利用过程如下：
+
+- 申请 `chunk A`、`chunk B`，其中 `chunk A` 的大小位于 `fastbin` 范围
+- 释放 `chunk A`，使其进入到 `fastbin`
+- 利用 `use after free`，修改 `A->fd` 指向地址 `X`，需要伪造好 `fake chunk`，使其不执行 `unlink` 或者绕过 `unlink`
+- 分配足够大的 `chunk`，或者释放 `0x10000` 以上的 `chunk`，只要能触发 `malloc_consolidate` 即可
+- 此时 `fake chunk` 被放到了 `unsortedbin`，或者进入到对应的 `smallbin/largebin`
+- 取出 `fake chunk` 进行读写即可
+
+####  相关技巧
+
+- `2.26` 加入了 `unlink` 对 `presize` 的检查
+- `2.27` 加入了 `fastbin` 的检查
+
+抓住重点：`house of rabbit` 是对 `malloc_consolidate` 的利用。因此，不一定要按照原作者的思路来，他的思路需要满足的条件太多了。
+
+#### 利用效果
+
+- 任意地址分配
+- 任意地址读写
+
+#### fastbin_dup_consolidate
+
+Glibc 2.35
 
 ```c
-typedef struct tcache_entry
-{
-  struct tcache_entry *next;
-} tcache_entry;
+#include <stdio.h>
+#include <stdlib.h>
+#include <assert.h>
+
+void main() {
+	void *ptr[7];
+
+	for(int i = 0; i < 7; i++)
+		ptr[i] = malloc(0x40);
+	for(int i = 0; i < 7; i++)
+		free(ptr[i]);
+
+	void* p1 = calloc(1,0x40);
+
+	printf("Allocate another chunk of the same size p1=%p \n", p1);
+  	free(p1);
+
+  	void* p3 = malloc(0x400);
+	printf("Allocating a tcache-sized chunk (p3=%p)\n", p3);
+
+	assert(p1 == p3);
+
+	free(p1);
+
+	void *p4 = malloc(0x400);
+
+	assert(p4 == p3);
+
+	printf("point to p3: p3=%p, p4=%p\n\n",p3, p4);
+}
 
 ```
 
-这里需要注意的是next指向chunk的`data`部分，这和fastbin有一些不同，fastbin的fd指向的是下一个chunk的头指针。tcache_entry会复用空闲chunk的data 部分
-
-**tcache_perthread_struct:**tcache_perthread_struct是用来管理tcache链表的，这个结构体位于heap段的起始位置，size大小为0x251,每一个thread都会维护一个`tcache_perthread_struct`结构体，一共有`TCACHE_MAX_BINS`个计数器`TCACHE_MAX_BINS`项tcache_entry
-
-```c
-typedef struct tcache_perthread_struct
-{
-  char counts[TCACHE_MAX_BINS];						//counts 记录了 tcache_entry 链上空闲 chunk 的数目，每条链上最多可以有 7 个 chunk
-  tcache_entry *entries[TCACHE_MAX_BINS];		//tcache_entry 用单向链表的方式链接了相同大小的处于空闲状态（free 后）的 chunk
-} tcache_perthread_struct;
-
-# define TCACHE_MAX_BINS                64
-
-static __thread tcache_perthread_struct *tcache = NULL;
-
-```
-
- ![在这里插入图片描述](https://i-blog.csdnimg.cn/blog_migrate/cf7fd07a7b6e50fb2aa73d40e232b166.jpeg#pic_center)
-
-#### tcache poisoning
-
-tcache poisoning主要的利用手段是覆盖tcache中的next成员变量，由于tcache_get()函数没有对next进行检查，所以理论上来讲如果我们将next中的地址进行替换，不需要伪造任何chunk结构即可实现malloc到任何地址
-
-##### libc 2.27
-
-##### libc 2.29
-
-Tcache Key
-
-在每个空闲 chunk 的 `fd` 指针旁边（即原 `bk` 指针的位置），你都能看到一个一模一样的神秘数值：
-
-- `0x5555555592a8`: `0x313f315503c525e4`
-- `0x555555559338`: `0x313f315503c525e4`
-
-这是 **Tcache Key**（在 glibc 2.29 引入）
-
-当一个 chunk 被放入 Tcache 时，glibc 会在这个位置写入一个随机生成的 8 字节密钥（每个程序的生命周期内这个密钥是固定的，存放在 `tcache_perthread_struct` 中
-
-**它的作用是防御 Tcache Double-Free：** 如果在程序执行 `free(p)` 时，堆管理器发现 `p` 的 key 位置存放的值与当前的 Tcache Key 相等，它就会遍历对应的 Tcache 链表。如果发现这个 chunk 已经在链表中了，就会直接报 `double free or corruption (fasttop)` 的 crash，从而阻止攻击者通过连续两次 free 同一个 chunk 来构造循环链表。
-
-##### libc 2.32
-
-```c
-pwndbg> heap
-Allocated chunk | PREV_INUSE
-Addr: 0x555555559000
-Size: 0x290 (with flag bits: 0x291)
-
-Free chunk (tcachebins) | PREV_INUSE
-Addr: 0x555555559290
-Size: 0x90 (with flag bits: 0x91)
-fd: 0x555555559
-
-Free chunk (tcachebins) | PREV_INUSE
-Addr: 0x555555559320
-Size: 0x90 (with flag bits: 0x91)
-fd: 0x55500000c7f9
-
-Top chunk | PREV_INUSE
-Addr: 0x5555555593b0
-Size: 0x20c50 (with flag bits: 0x20c51)
-
-pwndbg> x/50gx 0x555555559290
-0x555555559290: 0x0000000000000000      0x0000000000000091		--> chunk a
-0x5555555592a0: 0x0000000555555559      0x313f315503c525e4
-0x5555555592b0: 0x0000000000000000      0x0000000000000000
-0x5555555592c0: 0x0000000000000000      0x0000000000000000
-0x5555555592d0: 0x0000000000000000      0x0000000000000000
-0x5555555592e0: 0x0000000000000000      0x0000000000000000
-0x5555555592f0: 0x0000000000000000      0x0000000000000000
-0x555555559300: 0x0000000000000000      0x0000000000000000
-0x555555559310: 0x0000000000000000      0x0000000000000000
-0x555555559320: 0x0000000000000000      0x0000000000000091		--> chunk b
-0x555555559330: 0x000055500000c7f9      0x313f315503c525e4
-0x555555559340: 0x0000000000000000      0x0000000000000000
-0x555555559350: 0x0000000000000000      0x0000000000000000
-0x555555559360: 0x0000000000000000      0x0000000000000000
-0x555555559370: 0x0000000000000000      0x0000000000000000
-0x555555559380: 0x0000000000000000      0x0000000000000000
-0x555555559390: 0x0000000000000000      0x0000000000000000
-0x5555555593a0: 0x0000000000000000      0x0000000000000000
-0x5555555593b0: 0x0000000000000000      0x0000000000020c51
-```
-
-在libc 2.32之后，堆管理器引入了**Safe-Linking** 和 **Tcache Key**保护机制：
-
-1. Safe-Linking
-
-   我们观察释放的chunk的fd：
-
-   chunk a：0x0000000555555559
-
-   chunk b：0x000055500000c7f9 
-
-   解密过程：
-
-   ```python
-   Chunk b 的 fd 指针存放在地址 0x555555559330
-   将其右移 12 位（也就是去掉最后三个十六进制位），得到 0x555555559
-   内存中存储的加密值为 0x55500000c7f9
-   0x55500000c7f9 ^ 0x0000000555555559 = 0x5555555592a0 即chunk a的数据区
-   
-   Chunk a 的 fd 指针存放在地址 0x5555555592a0 右移 12 位得到 0x555555559
-   内存中的加密值为 0x0000000555555559
-   0x0000000555555559 ^ 0x0000000555555559 = 0x0000000000000000
-   解密结果为 0，说明 Chunk a 是这个 Tcache 链表上的最后一个块。
-   
-   def protect_ptr(pos, ptr):
-       """
-       加密指针：用于在利用漏洞覆盖 fd 时，计算出需要写入的加密值
-       :param pos: 存放该 fd 指针的内存地址 (即 堆块起始地址 + 0x10)
-       :param ptr: 你真正想要 tcache 指向的目标地址 (如栈地址、__free_hook 等)
-       :return: 应该写入内存的加密后数据
-       """
-       return (pos >> 12) ^ ptr
-   
-   def reveal_ptr(pos, val):
-       """
-       解密指针：用于在泄露了堆内存后，还原出真实的下一跳地址
-       :param pos: 存放该 fd 指针的内存地址
-       :param val: 从内存中泄露/读取出的加密值
-       :return: 真实的堆块物理地址
-       """
-       return (pos >> 12) ^ val
-   ```
-
-   
+由于是glibc 2.35，需要先malloc free7个chunk填满tcache bin，接下来申请一个fastbin 大小的chunk（0x40），然后将其free掉，这个chunk进入fastbin中![image-20260323184632876](C:\Users\hua\AppData\Roaming\Typora\typora-user-images\image-20260323184632876.png)
 
 
 
+接下来通过申请一个大小属于largebin的chunk来触发malloc_consolidate函数，该函数在malloc fastbin chunk的时候来检查fastbin中小的chunk，将其合并以减少碎片。
+
+简单来说，就是轻量版本的free里的consolidation过程，是针对fastbin chunk的，流程如下：
+
+1. 设置`av->have_fastchunks`为false
+2. 遍历每一个fastbin
+3. 遇到fastbin chunk，就进行合并
+   1. 安全检查：该chunk的大小和该bin的大小需要匹配
+   2. 向上合并（低地址），能合就合
+   3. 向下合并（高地址），能合就合
+      1. 如果不是top chunk，就插入到unsortedbin的前面
+      2. 如果是top chunk，就合并到top chunk中
+
+进入 malloc_consolidation 的条件
+
+1. `_int_malloc`中，当不能从`fastbin`中申请，且申请大小不属于`small size`时，如果当前`arena`有`fastbin chunk`，就会进行调用
+2. `_int_malloc`中，当无法通过`top chunk`分配，且`arena`中有`fastbin chunk`时，就会进行调用
+3. `_int_free`中，释放到`unsortedbin`进行`consolidation`的过程中，在向前向后合并完成了以后，如果合并的大小超过`0x10000`，就检测fastbin chunk并进行合并
+
+**fastbin chunk 进行合并有哪些安全检查？**
+
+和 libc 2.23 相比，新增了3个检查：
+
+1. 在遍历的时候，会检查chunk的内存对齐
+2. 在遍历的时候，会检查chunk的大小和fastbin的大小是否匹配
+3. **在向前合并的时候，会检查prev_size和前一个chunk的size是否相同**
 
 
 
+因此，当我们malloc(0x400)时，触发malloc_consolidate，让上图的chunk与top chunk合并，合并后在fastbin chunk的原地址分配largebin大小的 chunk，此时两个指针P1与P3便指向同一个chunk了。free(p1)，后重新malloc(0x400)，得到的p4与p3指向同一个chunk
 
+#### 任意地址分配与读写
 
+需要可以控制fd指针，接下来通过**HITB-GSEC-XCTF 2018 mutepig**来学习一下：
 
+只要可以控制`fastbin chunk`的`fd`指针，之后只需要将`fd`指针指向一个任意地方的`fake chunk`，然后触发`malloc_consolidate`，就可以申请到该位置的`fake chunk`。但也需要附加条件，那就是需要该`fake chunk`的下一个和下下个`fake chunk`也构造好（实际上只需要构造`chunk size`）。画个图来理解：
 
+![image-20231114100530815](https://ltfallpics.oss-cn-hangzhou.aliyuncs.com/images/202311211716419.png)
 
+当可以控制`chunksize`时，可以获得一个`chunk overlap`。具体过程如下：
 
+首先申请两个相同大小的`chunk`，例如`0x40`的两个`chunk`。释放后，我们将第一个`chunksize`更改为`0x80`，此时若触发`malloc_consolidate`，那么会分别将两个`chunk`添加到大小为`0x40`和`0x80`的`smallbin`中。那么当`size`被修改为`0x80`的`chunk`被添加到大小为`0x80`的`smallbin`中后，`chunk overlap`实际上就已经发生了。因为只需要申请大小为`0x80`的`chunk`就可以获得这个`chunk`了。
 
 
 

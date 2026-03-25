@@ -1,5 +1,11 @@
 import type { AUTO_MODE, DARK_MODE, LIGHT_MODE } from "@constants/constants";
 
+export type DeployConfig = {
+	site: string;
+	base: string;
+	trailingSlash?: "always" | "never" | "ignore";
+};
+
 export type SiteConfig = {
 	title: string;
 	subtitle: string;
@@ -77,6 +83,18 @@ export type ProfileConfig = {
 	}[];
 };
 
+export type FooterLink = {
+	label: string;
+	url: string;
+	external?: boolean;
+};
+
+export type FooterConfig = {
+	startYear: number;
+	links: FooterLink[];
+	poweredBy?: FooterLink[];
+};
+
 export type LicenseConfig = {
 	enable: boolean;
 	name: string;
@@ -92,8 +110,79 @@ export type ImageFallbackConfig = {
 export type UmamiConfig = {
 	enable: boolean;
 	baseUrl: string;
+	websiteId: string;
 	shareId: string;
 	timezone: string;
+};
+
+export type SiteAssetsConfig = {
+	preconnect?: string[];
+	backgroundScriptUrl?: string;
+};
+
+export type CookieConsentConfig = {
+	enable: boolean;
+	scriptUrl: string;
+	noticeBannerType: string;
+	consentType: string;
+	language: string;
+	pageLoadConsentLevels: string[];
+	showRejectButton: boolean;
+	showPreferencesCloseButton: boolean;
+	pageRefreshConfirmationButtons: boolean;
+	websiteName: string;
+	privacyPolicyUrl?: string;
+};
+
+type ConsentScopedConfig = {
+	enable: boolean;
+	consentLevel?: string;
+};
+
+export type GoogleAnalyticsConfig = ConsentScopedConfig & {
+	measurementId: string;
+};
+
+export type ClarityConfig = ConsentScopedConfig & {
+	projectId: string;
+};
+
+export type AdsenseConfig = ConsentScopedConfig & {
+	clientId: string;
+};
+
+export type AnalyticsConfig = {
+	googleAnalytics: GoogleAnalyticsConfig;
+	clarity: ClarityConfig;
+	adsense: AdsenseConfig;
+};
+
+export type GiscusConfig = {
+	enable: boolean;
+	repo: string;
+	repoId: string;
+	category: string;
+	categoryId: string;
+	mapping: string;
+	strict: string;
+	reactionsEnabled: string;
+	emitMetadata: string;
+	inputPosition: string;
+	lang: string;
+	loading: string;
+};
+
+export type PostActionConfig = {
+	label: string;
+	url: string;
+	icon: string;
+	external?: boolean;
+	variant?: "primary" | "secondary";
+};
+
+export type PostActionsConfig = {
+	contact: PostActionConfig;
+	sponsor: PostActionConfig;
 };
 
 export type LIGHT_DARK_MODE =
@@ -125,8 +214,7 @@ export type GitHubEditConfig = {
 };
 
 export type NoticeConfig = {
-    enable: boolean;
-    level: "info" | "note" | "tip" | "caution" | "warning" | "important";
-    content: string;
+	enable: boolean;
+	level: "info" | "note" | "tip" | "caution" | "warning" | "important";
+	content: string;
 };
-

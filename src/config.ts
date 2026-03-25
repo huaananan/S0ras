@@ -1,73 +1,85 @@
 import type {
+	AnalyticsConfig,
+	CookieConsentConfig,
+	DeployConfig,
 	ExpressiveCodeConfig,
+	FooterConfig,
+	GiscusConfig,
 	GitHubEditConfig,
 	ImageFallbackConfig,
 	LicenseConfig,
 	NavBarConfig,
 	NoticeConfig,
+	PostActionsConfig,
 	ProfileConfig,
+	SiteAssetsConfig,
 	SiteConfig,
 	UmamiConfig,
 } from "./types/config";
 import { LinkPreset } from "./types/config";
 
 export const noticeConfig: NoticeConfig = {
-    enable: true,
-    level: "info",
-    content: "欢迎来到我的博客！",
+	enable: true,
+	level: "info",
+	content:
+		"<strong>\u6B22\u8FCE\u6765\u5230\u6211\u7684\u535A\u5BA2\u3002</strong> \u8FD9\u91CC\u4E3B\u8981\u8BB0\u5F55\u5F00\u53D1\u3001\u5B89\u5168\u548C CTF \u5B66\u4E60\u3002",
+};
+
+export const deployConfig: DeployConfig = {
+	site: "https://huaananan.github.io",
+	base: "/S0ras",
+	trailingSlash: "always",
 };
 
 export const siteConfig: SiteConfig = {
 	title: "S0ras",
-	subtitle: "",
+	subtitle: "\u5F00\u53D1\u4E0E\u5B89\u5168\u5B66\u4E60",
 	description:
-		"开发与安全学习",
-
-	keywords: [],
-	lang: "zh_CN", // 'en', 'zh_CN', 'zh_TW', 'ja', 'ko', 'es', 'th'
+		"\u805A\u7126\u5F00\u53D1\u3001\u7F51\u7EDC\u5B89\u5168\u3001CTF \u4E0E\u65E5\u5E38\u6280\u672F\u8BB0\u5F55\u3002",
+	keywords: [
+		"S0ras",
+		"S0ra",
+		"Astro",
+		"Blog",
+		"CTF",
+		"Security",
+		"\u6280\u672F\u535A\u5BA2",
+		"\u7F51\u7EDC\u5B89\u5168",
+		"\u5F00\u53D1",
+	],
+	lang: "zh_CN",
 	themeColor: {
-		hue: 361, // Default hue for the theme color, from 0 to 360. e.g. red: 0, teal: 200, cyan: 250, pink: 345
-		fixed: false, // Hide the theme color picker for visitors
-		forceDarkMode: false, // Force dark mode and hide theme switcher
+		hue: 361,
+		fixed: false,
+		forceDarkMode: false,
 	},
 	banner: {
 		enable: false,
-		src: "/xinghui.avif", // Relative to the /src directory. Relative to the /public directory if it starts with '/'
-
-		position: "center", // Equivalent to object-position, only supports 'top', 'center', 'bottom'. 'center' by default
+		src: "/xinghui.avif",
+		position: "center",
 		credit: {
-			enable: true, // Display the credit text of the banner image
-			text: "Pixiv @chokei", // Credit text to be displayed
-
-			url: "https://www.pixiv.net/artworks/122782209", // (Optional) URL link to the original artwork or artist's page
+			enable: true,
+			text: "Pixiv @chokei",
+			url: "https://www.pixiv.net/artworks/122782209",
 		},
 	},
 	background: {
-		enable: true, // Enable background image
-		src: "/random/h", // Background image URL (supports HTTPS)
-		position: "center", // Background position: 'top', 'center', 'bottom'
-		size: "cover", // Background size: 'cover', 'contain', 'auto'
-		repeat: "no-repeat", // Background repeat: 'no-repeat', 'repeat', 'repeat-x', 'repeat-y'
-		attachment: "fixed", // Background attachment: 'fixed', 'scroll', 'local'
-		opacity: 1, // Background opacity (0-1)
+		enable: true,
+		src: "/random/h",
+		position: "center",
+		size: "cover",
+		repeat: "no-repeat",
+		attachment: "fixed",
+		opacity: 1,
 	},
 	toc: {
-		enable: true, // Display the table of contents on the right side of the post
-		depth: 2, // Maximum heading depth to show in the table, from 1 to 3
+		enable: true,
+		depth: 2,
 	},
 	favicon: [
-		// Leave this array empty to use the default favicon
 		{
-			src: "/sora.png?v=2", // Path of the favicon, relative to the /public directory
-			//   theme: 'light',              // (Optional) Either 'light' or 'dark', set only if you have different favicons for light and dark mode
-			//   sizes: '32x32',              // (Optional) Size of the favicon, set only if you have favicons of different sizes
+			src: "/sora.png?v=2",
 		},
-	],
-	officialSites: [
-		
-	],
-	server: [
-		
 	],
 };
 
@@ -76,56 +88,51 @@ export const navBarConfig: NavBarConfig = {
 		LinkPreset.Home,
 		LinkPreset.Archive,
 		{
-			name: "友链",
-			url: "/friends/", // Internal links should not include the base path, as it is automatically added
-			external: false, // Show an external link icon and will open in a new tab
+			name: "\u53CB\u94FE",
+			url: "/friends/",
+			external: false,
 		},
-		// {
-		// 	name: "统计",
-		// 	url: "https://umami.acofork.com/share/CdkXbGgZr6ECKOyK", // Internal links should not include the base path, as it is automatically added
-		// 	external: true, // Show an external link icon and will open in a new tab
-		// },
-		// {
-		// 	name: "监控",
-		// 	url: "https://status.acofork.com", // Internal links should not include the base path, as it is automatically added
-		// 	external: true, // Show an external link icon and will open in a new tab
-		// },
 	],
 };
 
 export const profileConfig: ProfileConfig = {
-	avatar: "/S0ras/sora.png", // Relative to the /src directory. Relative to the /public directory if it starts with '/'
+	avatar: "/sora.png",
 	name: "S0ra",
 	bio: "Protect What You Love.",
 	links: [
 		{
-			name: "QQ",
-			icon: "qq", // Local icon
-			url: "",
-		},
-		{
-			name: "Telegram",
-			icon: "telegram", // Local icon
-			url: "",
-		},
-		{
-			name: "Bilibli",
-			icon: "bilibili", // Local icon
-			url: "",
-		},
-		{
 			name: "GitHub",
-			icon: "github", // Local icon
+			icon: "github",
 			url: "https://github.com/huaananan/",
-		},
-		{
-			name: "Folo",
-			icon: "folo", // Local icon
-			url: "",
 		},
 	],
 };
 
+export const footerConfig: FooterConfig = {
+	startYear: 2024,
+	links: [
+		{
+			label: "RSS",
+			url: "/rss.xml",
+		},
+		{
+			label: "\u7F51\u7AD9\u5730\u56FE",
+			url: "/sitemap-index.xml",
+		},
+	],
+	poweredBy: [
+		{
+			label: "Astro",
+			url: "https://astro.build",
+			external: true,
+		},
+		{
+			label: "Fuwari",
+			url: "https://github.com/saicaca/fuwari",
+			external: true,
+		},
+	],
+};
 
 export const licenseConfig: LicenseConfig = {
 	enable: true,
@@ -142,17 +149,85 @@ export const imageFallbackConfig: ImageFallbackConfig = {
 export const umamiConfig: UmamiConfig = {
 	enable: true,
 	baseUrl: "https://umami.acofork.com",
+	websiteId: "5d710dbd-3a2e-43e3-a553-97b415090c63",
 	shareId: "CdkXbGgZr6ECKOyK",
 	timezone: "Asia/Shanghai",
+};
+
+export const siteAssetsConfig: SiteAssetsConfig = {
+	preconnect: ["https://pic1.acofork.com", "https://umami.acofork.com"],
+	backgroundScriptUrl: "https://pic1.acofork.com/random.js",
+};
+
+export const cookieConsentConfig: CookieConsentConfig = {
+	enable: true,
+	scriptUrl:
+		"https://www.termsfeed.com/public/cookie-consent/4.2.0/cookie-consent.js",
+	noticeBannerType: "simple",
+	consentType: "express",
+	language: "en",
+	pageLoadConsentLevels: ["strictly-necessary"],
+	showRejectButton: true,
+	showPreferencesCloseButton: true,
+	pageRefreshConfirmationButtons: false,
+	websiteName: "S0ras",
+};
+
+export const analyticsConfig: AnalyticsConfig = {
+	googleAnalytics: {
+		enable: true,
+		consentLevel: "tracking",
+		measurementId: "G-YG02LLPGWC",
+	},
+	clarity: {
+		enable: true,
+		consentLevel: "tracking",
+		projectId: "v94yrasi99",
+	},
+	adsense: {
+		enable: true,
+		consentLevel: "targeting",
+		clientId: "ca-pub-1683686345039700",
+	},
 };
 
 export const expressiveCodeConfig: ExpressiveCodeConfig = {
 	theme: "github-dark",
 };
 
-export const gitHubEditConfig: GitHubEditConfig = {
+export const giscusConfig: GiscusConfig = {
 	enable: true,
-	baseUrl: "https://github.com/huaananan/my-blog/blob/main/src/content/posts",
+	repo: "afoim/giscus-fuwari",
+	repoId: "R_kgDOOi8quw",
+	category: "Announcements",
+	categoryId: "DIC_kwDOOi8qu84CprDV",
+	mapping: "pathname",
+	strict: "1",
+	reactionsEnabled: "1",
+	emitMetadata: "0",
+	inputPosition: "top",
+	lang: "zh-CN",
+	loading: "lazy",
 };
 
-// todoConfig removed from here
+export const postActionsConfig: PostActionsConfig = {
+	contact: {
+		label: "\u8054\u7CFB",
+		url: "https://github.com/huaananan/",
+		icon: "material-symbols:contact-mail-outline",
+		external: true,
+		variant: "secondary",
+	},
+	sponsor: {
+		label: "\u8D5E\u52A9",
+		url: "/sponsors/",
+		icon: "material-symbols:favorite-outline",
+		external: false,
+		variant: "primary",
+	},
+};
+
+export const gitHubEditConfig: GitHubEditConfig = {
+	enable: true,
+	baseUrl: "https://github.com/huaananan/my-blog/edit/main/src/content/posts",
+};
